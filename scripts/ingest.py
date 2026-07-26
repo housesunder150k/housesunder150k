@@ -734,8 +734,8 @@ def parse_content_output(text: str) -> dict:
     current_lines = []
 
     for line in text.splitlines():
-        stripped = line.strip()
-        # Match label with or without colon, and handle '---' separators
+        # Strip markdown bold markers, hashes, and whitespace before matching
+        stripped = line.strip().lstrip('#').strip().replace('**', '').strip()
         if stripped in ("---", "----"):
             continue
         matched_label = next((l for l in labels if stripped == l or stripped == f"{l}:"), None)
