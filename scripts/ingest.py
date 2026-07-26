@@ -436,6 +436,8 @@ def extract_description(details: dict | None) -> str:
     if not details:
         return ""
     log.info(f"[DEBUG] details keys: {list(details.keys())}")
+    inner = details.get("details") or {}
+    log.info(f"[DEBUG] inner keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
     candidates = [
         details.get("remarks", ""),
         details.get("description", ""),
