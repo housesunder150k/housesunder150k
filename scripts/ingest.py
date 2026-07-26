@@ -388,78 +388,165 @@ def _ra_headers() -> dict:
     return {"x-realtyapi-key": REALTYAPI_KEY}
 
 
-def fetch_search_results(state_name: str, result_count: int = 25) -> list[dict]:
-    """Fetch active for-sale listings under $150K in a given state via Redfin."""
+REALTYAPI_REALTOR_BASE = "https://realtor.realtyapi.io"
+
+
+def fetch_search_results(state_name: str, result_count: int = 50) -> list[dict]:
+    """Fetch active for-sale listings under $150K in a given state via Realtor.com."""
     params = {
-        "locationName": state_name,
-        "maxPrice": "150000",
+        "location": state_name,
+        "priceRange": "max:150000",
         "searchType": "For_Sale",
-        "status": "Active",
-        "homeType": "House,condo,townhouse,Multi family",
+        "propertyType": "House,Townhome",
         "sortOrder": "Newest",
+        "hasPhotos": True,
+        "seniorCommunity": False,
         "resultCount": result_count,
     }
     try:
         r = requests.get(
-            f"{REALTYAPI_BASE}/search/bylocation",
+            f"{REALTYAPI_REALTOR_BASE}/search/bylocation",
             headers=_ra_headers(),
             params=params,
             timeout=30,
         )
         r.raise_for_status()
         data = r.json()
-        results = data.get("searchResults", [])
-        log.info(f"RealtyAPI [{state_name}]: {len(results)} results")
+        results = data.get("data", {}).get("results", []) or data.get("results", []) or []
+        log.info(f"Realtor.com [{state_name}]: {len(results)} results")
         return results
     except requests.RequestException as e:
-        log.error(f"RealtyAPI search failed [{state_name}]: {e}")
+        log.error(f"Realtor.com search failed [{state_name}]: {e}")
         return []
 
 
-def fetch_listing_details(property_id: str, listing_id: str) -> dict | None:
-    """Fetch full listing details including description."""
+def fetch_listing_details(property_id: str) -> dict | None:
+    """Fetch full listing details including description from Realtor.com."""
     try:
         r = requests.get(
-            f"{REALTYAPI_BASE}/detailsbyid",
+            f"{REALTYAPI_REALTOR_BASE}/details/byid",
             headers=_ra_headers(),
-            params={"property_id": property_id, "listing_id": listing_id},
+            params={"property_id": property_id},
             timeout=30,
         )
         r.raise_for_status()
         return r.json()
     except requests.RequestException as e:
-        log.error(f"RealtyAPI details failed [property {property_id}]: {e}")
+        log.error(f"Realtor.com details failed [property {property_id}]: {e}")
         return None
 
 
 def extract_description(details: dict | None) -> str:
-    """Extract listing description from detailsbyid response."""
+    """Extract listing description from details/byid response."""
     if not details:
         return ""
-    inner = details.get("details") or {}
+    # Realtor.com nests data — try common paths
+    data = details.get("data") or details
     candidates = [
-        inner.get("remarks", ""),
-        inner.get("description", ""),
-        inner.get("publicRemarks", ""),
-        inner.get("listingRemarks", ""),
-        (inner.get("listingInfo") or {}).get("remarks", ""),
-        (inner.get("payload") or {}).get("remarks", ""),
-        details.get("remarks", ""),
-        details.get("description", ""),
-        details.get("publicRemarks", ""),
+        data.get("description", {}).get("text", "") if isinstance(data.get("description"), dict) else data.get("description", ""),
+        data.get("remarks", ""),
+        data.get("publicRemarks", ""),
+        (data.get("details") or {}).get("description", ""),
+        (data.get("details") or {}).get("remarks", ""),
+        (data.get("listing") or {}).get("description", ""),
+        (data.get("listing") or {}).get("remarks", ""),
     ]
-    return next((c for c in candidates if c and len(c) > 10), "")
+    return next((c for c in candidates if isinstance(c, str) and len(c) > 10), "")
+
+
+def normalize_listing(result: dict, description: str) -> dict | None:
+    """Normalize a Realtor.com search result into the pipeline's listing dict."""
+    # Realtor.com field paths
+    prop = result.get("property_id", "") or result.get("propertyId", "")
+    listing_id = result.get("listing_id", "") or result.get("listingId", "")
+    mls_id = result.get("mls_id", "") or result.get("mlsId", "") or prop
+
+    if not prop or not mls_id:
+        return None
+
+    # Location
+    location = result.get("location", {}) or {}
+    address = location.get("address", {}) or {}
+    street = address.get("line", "") or ""
+    city = address.get("city", "") or ""
+    state_abbr = address.get("state_code", "") or address.get("state", "") or ""
+    zip_code = address.get("postal_code", "") or ""
+    state_full = STATE_FULL_NAME.get(state_abbr, state_abbr)
+
+    # Price
+    list_price = parse_int(
+        result.get("list_price") or
+        result.get("price") or
+        (result.get("priceInfo") or {}).get("amount", 0)
+    )
+
+    # Specs
+    desc_block = result.get("description", {}) or {}
+    beds = parse_int(desc_block.get("beds") or result.get("beds") or 0)
+    baths = parse_int(desc_block.get("baths") or result.get("baths") or 0)
+    sqft = parse_int(desc_block.get("sqft") or result.get("sqft") or 0)
+    year_built = parse_int(desc_block.get("year_built") or result.get("year_built") or 0)
+    lot_sqft = parse_int(desc_block.get("lot_sqft") or result.get("lot_sqft") or 0)
+    lot_acres = round(lot_sqft / 43560, 2) if lot_sqft else None
+
+    # DOM
+    dom = parse_int(result.get("list_date_delta") or result.get("daysOnMarket") or 0)
+
+    # Photos
+    photos = []
+    primary = result.get("primary_photo", {}) or {}
+    if primary.get("href"):
+        photos.append(primary["href"])
+    for photo in (result.get("photos") or []):
+        href = photo.get("href", "") if isinstance(photo, dict) else ""
+        if href and href not in photos:
+            photos.append(href)
+
+    # Waterfront/pool from description
+    desc_lower = description.lower()
+    waterfront = any(w in desc_lower for w in [
+        "waterfront", "water front", "lakefront", "lake front",
+        "riverfront", "river front", "oceanfront", "pond",
+    ])
+    pool = "pool" in desc_lower
+
+    return {
+        "mlsNumber": mls_id,
+        "propertyId": prop,
+        "listingId": listing_id,
+        "listPrice": list_price,
+        "daysOnMarket": dom,
+        "address": {
+            "formattedStreetLine": street,
+            "city": city,
+            "state": state_abbr,
+            "stateFull": state_full,
+            "zip": zip_code,
+        },
+        "details": {
+            "numBedrooms": beds,
+            "numBathrooms": baths,
+            "sqft": sqft,
+            "yearBuilt": year_built,
+            "description": description,
+            "lotAcres": lot_acres,
+            "waterfront": waterfront,
+            "pool": pool,
+        },
+        "images": photos,
+    }
 
 
 def fetch_listings() -> list[dict]:
     """
     Rotate through US states, collect up to 50 unique active listings under $150K.
-    For each listing, fetches full details to get description.
+    Uses Realtor.com via RealtyAPI for nationwide coverage.
+    Fetches full details per listing to get description.
     Returns normalized listing dicts.
     """
     target = 50
     collected = []
-    seen_mls = set()
+    seen_ids = set()
 
     states = US_STATES.copy()
     random.shuffle(states)
@@ -468,78 +555,33 @@ def fetch_listings() -> list[dict]:
         if len(collected) >= target:
             break
 
-        results = fetch_search_results(state, result_count=25)
+        results = fetch_search_results(state, result_count=50)
+        if not results:
+            continue
 
         for result in results:
             if len(collected) >= target:
                 break
 
-            home = result.get("homeData", {})
-            mls_id = home.get("mlsId", "")
-            if not mls_id or mls_id in seen_mls:
-                continue
-
-            property_id = home.get("propertyId", "")
-            listing_id = home.get("listingId", "")
-            if not property_id or not listing_id:
+            prop_id = result.get("property_id", "") or result.get("propertyId", "")
+            if not prop_id or prop_id in seen_ids:
                 continue
 
             # Fetch full details for description
-            details = fetch_listing_details(property_id, listing_id)
+            details = fetch_listing_details(prop_id)
             time.sleep(0.2)
 
             description = extract_description(details)
 
-            # Parse fields from search result
-            addr_info = home.get("addressInfo", {})
-            price = parse_int(home.get("priceInfo", {}).get("amount", 0))
-            sqft = parse_int(home.get("sqftInfo", {}).get("amount", 0))
-            year_built = home.get("yearBuilt", {}).get("yearBuilt", 0)
-            dom = parse_int(home.get("daysOnMarket", {}).get("daysOnMarket", 0))
-            lot_sqft = parse_int(home.get("lotSize", {}).get("amount", 0))
-            lot_acres = round(lot_sqft / 43560, 2) if lot_sqft else None
+            listing = normalize_listing(result, description)
+            if not listing:
+                continue
 
-            photo_urls = home.get("photoUrls", {})
-            photos = photo_urls.get("highRes") or photo_urls.get("mediumRes") or []
+            # Skip if price is 0 or missing
+            if listing["listPrice"] <= 0:
+                continue
 
-            state_abbr = addr_info.get("state", "")
-            state_full = STATE_FULL_NAME.get(state_abbr, state_abbr)
-
-            # Detect waterfront/pool from description
-            desc_lower = description.lower()
-            waterfront = any(w in desc_lower for w in [
-                "waterfront", "water front", "lakefront", "lake front",
-                "riverfront", "river front", "oceanfront", "pond",
-            ])
-            pool = "pool" in desc_lower
-
-            listing = {
-                "mlsNumber": mls_id,
-                "propertyId": property_id,
-                "listingId": listing_id,
-                "listPrice": price,
-                "daysOnMarket": dom,
-                "address": {
-                    "formattedStreetLine": addr_info.get("formattedStreetLine", ""),
-                    "city": addr_info.get("city", ""),
-                    "state": state_abbr,
-                    "stateFull": state_full,
-                    "zip": addr_info.get("zip", ""),
-                },
-                "details": {
-                    "numBedrooms": home.get("beds", 0),
-                    "numBathrooms": home.get("bathInfo", {}).get("computedTotalBaths", 0),
-                    "sqft": sqft,
-                    "yearBuilt": year_built,
-                    "description": description,
-                    "lotAcres": lot_acres,
-                    "waterfront": waterfront,
-                    "pool": pool,
-                },
-                "images": photos,
-            }
-
-            seen_mls.add(mls_id)
+            seen_ids.add(prop_id)
             collected.append(listing)
 
     log.info(f"Fetched {len(collected)} total listings")
