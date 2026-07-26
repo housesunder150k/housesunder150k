@@ -41,6 +41,7 @@ SOVRN_AFFILIATE_URL    = os.environ["SOVRN_AFFILIATE_URL"]
 CLAUDE_MODEL           = "claude-sonnet-4-6"
 CLAUDE_MAX_TOKENS      = 1000
 REPLIERS_BASE          = "https://api.repliers.io"
+REPLIERS_CDN           = "https://cdn.repliers.io"
 ANTHROPIC_BASE         = "https://api.anthropic.com/v1/messages"
 CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/images/v1"
 CF_DELIVERY_BASE       = "https://imagedelivery.net/VbqNe4WDJ-oPFPFAkDRv_w"
@@ -287,7 +288,7 @@ You write in the voice of Michelle Bowers from The Old House Life. Her format:
 1. A short, genuine, enthusiastic reaction (2-4 sentences) — the thing that stops the scroll
 2. The key facts woven together in natural flowing sentences — not a spec list
 3. The agent description rewritten in enthusiastic conversational voice — extract facts, never quote directly
-4. A simple CTA
+4. End cleanly — no CTA line, the site handles that
 
 Short is better. The house is the content. You are the curator.
 
@@ -306,8 +307,6 @@ CITY: {city}
 STATE: {state_full}
 PRICE DISPLAY: ${price_display}
 BEDS: {bedrooms} | BATHS: {bathrooms} | SQFT: {sqft} | YEAR BUILT: {year_built}
-LISTING URL: {listing_url}
-AFFILIATE LINK: {affiliate_url}
 
 EDITORIAL CATEGORY: {category}
 (NEW_CONSTRUCTION = impossible value at new / WATERFRONT = any water / ACREAGE = land is the story /
@@ -334,7 +333,7 @@ Tell the story in 150-250 words. Structure:
 - Key facts woven into narrative — never a spec list — make the reader see it
 - Location context briefly
 - Who this is for and why it matters
-End with exactly: See the full listing here → {affiliate_url}
+Do NOT include any CTA line or link at the end — end on the story itself.
 
 SOCIAL_CAPTION
 Under 60 words. First line must stop the scroll. Include price and location. End with a reason to click. No hashtags. Write like a person, not a brand.
@@ -413,6 +412,38 @@ def format_richtext(text: str) -> str:
     """Wrap narrative paragraphs in Webflow richtext HTML"""
     paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
     return "".join(f"<p>{p}</p>" for p in paragraphs)
+
+
+def make_realtor_url(addr: dict) -> str:
+    """
+    Construct a Realtor.com address search URL from listing address fields.
+    Format: https://www.realtor.com/realestateandhomes-search/Street_City_State_Zip
+    Falls back to city+state search if no street available.
+    """
+    street_num  = str(addr.get("streetNumber", "") or "").strip()
+    street_name = str(addr.get("streetName", "") or "").strip()
+    street_suf  = str(addr.get("streetSuffix", "") or "").strip()
+    city        = str(addr.get("city", "") or "").strip()
+    state       = str(addr.get("state", "") or "").strip()
+    zip_code    = str(addr.get("zip", "") or "").strip()
+
+    state_abbr  = state_abbrev(state)
+
+    def slugify(s: str) -> str:
+        return re.sub(r"[^a-zA-Z0-9]+", "-", s).strip("-")
+
+    if street_num and street_name:
+        street = f"{street_num}-{street_name}"
+        if street_suf:
+            street += f"-{street_suf}"
+        parts = [slugify(street), slugify(city), state_abbr]
+        if zip_code:
+            parts.append(zip_code)
+        path = "_".join(parts)
+    else:
+        path = f"{slugify(city)}_{state_abbr}"
+
+    return f"https://www.realtor.com/realestateandhomes-search/{path}"
 
 
 # ---------------------------------------------------------------------------
@@ -627,8 +658,6 @@ def generate_content(listing: dict, score_data: dict) -> dict | None:
     sqft         = parse_sqft(details.get("sqft"))
     year_built   = parse_int(details.get("yearBuilt"))
     description  = details.get("description", "") or "(no description)"
-    slug         = make_slug(city, price)
-    listing_url  = f"https://housesunder150k.com/listings/{slug}"
 
     prompt = CONTENT_PROMPT_TEMPLATE.format(
         address=address,
@@ -639,8 +668,6 @@ def generate_content(listing: dict, score_data: dict) -> dict | None:
         bathrooms=baths,
         sqft=sqft,
         year_built=year_built,
-        listing_url=listing_url,
-        affiliate_url=SOVRN_AFFILIATE_URL,
         category=score_data.get("CATEGORY", ""),
         key_hooks=score_data.get("KEY_HOOKS", ""),
         description=description,
@@ -699,6 +726,10 @@ def upload_image(image_url: str, slug: str) -> str | None:
     if "imagedelivery.net" in image_url:
         log.info(f"Image already on Cloudflare, skipping upload: {image_url}")
         return image_url
+
+    # Repliers returns relative paths — prepend CDN base
+    if not image_url.startswith("http"):
+        image_url = f"{REPLIERS_CDN}/{image_url}"
 
     log.info(f"Fetching image from MLS: {image_url}")
     try:
@@ -767,7 +798,11 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
     baths      = parse_int(details.get("numBathrooms"))
     sqft       = parse_sqft(details.get("sqft"))
     year       = parse_int(details.get("yearBuilt"))
+
+    # listing-url = our page on the site
     listing_url = f"https://housesunder150k.com/listings/{slug}"
+    # affiliate-url = Realtor.com address search (lands user near the listing)
+    affiliate_url = make_realtor_url(addr)
 
     headline = content.get("HEADLINE", "")
     name = headline if headline else f"{city}, {state_full} — ${make_price_display(price)}"
@@ -791,7 +826,7 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "narrative-body":   format_richtext(content.get("NARRATIVE", "")),
         "short-summary":    content.get("SHORT_SUMMARY", ""),
         "listing-url":      listing_url,
-        "affiliate-url":    SOVRN_AFFILIATE_URL,
+        "affiliate-url":    affiliate_url,
         "social-caption":   content.get("SOCIAL_CAPTION", ""),
         "status":           WF_STATUS_ACTIVE,
         "deal-of-the-day":  is_hero,
@@ -890,7 +925,7 @@ def process_listing(listing: dict) -> str:
         log.error(f"Content generation failed for {slug}")
         return "error"
 
-    # Image — fetch images[0], upload to Cloudflare
+    # Image — fetch images[0] from Repliers CDN, upload to Cloudflare
     images = listing.get("images", [])
     hero_image_url = None
     if images:
