@@ -108,178 +108,54 @@ STATE_ABBREV = {
 # Prompts
 # ---------------------------------------------------------------------------
 
-SCORING_PROMPT = """You are an editorial scoring engine for HousesUnder150K.com, a curated real estate deals site. Your job is to evaluate residential listings priced under $150,000 and score them on a scale of 1-10 based on their editorial merit and reader interest.
+SCORING_PROMPT = """Score this residential listing for HousesUnder150K.com on editorial merit (1-10). Be strict — most listings score 4 or below. Only genuinely interesting listings score 6+. Low price alone is never enough.
 
-You will be given listing data including specs, location, and the agent description. Score the listing based on the criteria below. Be honest and strict — most listings should score 4 or below. Only genuinely interesting listings score 6+.
-
----
-
-## AUTOMATIC 6+ FLOOR
-
-If ANY of the following are present, the listing automatically scores at least a 6 regardless of other factors:
-
-- Waterfront (lake, river, pond, ocean, creek)
+AUTOMATIC 6+ FLOOR (any one qualifies):
+- Waterfront / lake / river / ocean / creek
 - Lake view or mountain view
-- Acreage (0.5+ acres qualifies, 1+ acre is stronger)
-- Pool (in-ground)
-- Wooded lot / woods / heavily treed
-- New construction (built current year or last 2 years)
-- Historic home (pre-1950 with character details mentioned)
+- Acreage 0.5+ acres
+- In-ground pool
+- Wooded lot
+- New construction (built within 2 years)
+- Historic home pre-1950 with character details
 
-If none of these are present, the listing must accumulate additive qualifiers to reach a 6.
-
----
-
-## ADDITIVE QUALIFIERS
-## Each qualifier that is clearly present adds to the score. More qualifiers = higher score.
-
-**Condition & Updates (each one counts):**
-- Recent renovation — kitchen, bathrooms, or whole home (within last 10 years, year mentioned preferred)
-- Major system update — new roof, new HVAC, new windows, new plumbing/electrical (year mentioned preferred)
-- Move-in ready, updated, or turnkey language with specifics to back it up
-
-**Size & Space:**
-- Square footage tier:
-  - Under 800 sqft: negative signal (-1)
-  - 800-1,100 sqft: neutral
-  - 1,100-1,400 sqft: mild positive (+0.5)
-  - 1,400-1,800 sqft: positive (+1)
-  - 1,800+ sqft: strong positive (+1.5)
-- Bedroom count:
-  - 1-2 bed: neutral to slight negative
-  - 3 bed: baseline, no adjustment
-  - 4 bed: positive (+0.5)
-  - 5+ bed: strong positive (+1)
-- Large yard beyond automatic floor (fenced, oversized city lot, corner lot with space)
-- Garage (attached or detached)
-- Outbuildings, barn, workshop, shed
-
-**Character & Uniqueness:**
-- Historical significance (listed on registry, named property, notable age with details)
-- Unique architectural features: stained glass windows, original millwork, exposed beams, tin ceilings, hardwood floors throughout, wraparound porch, clawfoot tub, built-ins, wainscoting
-- Unusual or rare property type for the price point
-- Fireplace (wood-burning preferred)
+POSITIVE SIGNALS (accumulate to reach 6 without a floor qualifier):
+- Recent renovation or major system update (roof/HVAC/windows) with specifics
+- Sqft: <800 = -1 | 800-1100 = neutral | 1100-1400 = +0.5 | 1400-1800 = +1 | 1800+ = +1.5
+- Beds: 4 = +0.5 | 5+ = +1
+- Garage, outbuildings, barn, workshop
+- Character features: stained glass, exposed beams, hardwood, wraparound porch, clawfoot tub, built-ins, tin ceilings, wainscoting, fireplace
 - Finished basement
+- Named nearby amenities, trails, parks, charming town
+- Price reduction (PRICE_CHANGE=decrease or LAST_STATUS=Pc)
+- High days on market + low price
+- Rich agent description with specifics: +0.5 to +1
 
-**Location & Community:**
-- Great schools or named school district mentioned
-- Walkable location with named amenities (shops, restaurants, trails, parks)
-- Named nearby features (trail system, state park, lake, river, downtown)
-- Small charming town with community feel
-- Low cost of living area
+NEGATIVE MODIFIERS:
+- Manufactured/mobile/modular: -3
+- Needs major work, no renovation history: -1
+- No photos: -1
+- Under 700 sqft: -1
+- HOA with high fees: -0.5
+- Sparse description (3 sentences or fewer): -1
 
-**Deal Signals:**
-- Price reduction / price cut (lastPriceChangeType = decrease or lastStatus = Pc)
-- High days on market with low price (motivated seller signal)
-- Exceptionally low price per square foot for any market
-- Bank owned / estate sale / motivated seller explicitly stated
+SCORING BANDS:
+1-3: Skip — no story, bad data, manufactured home
+4-5: Below threshold — decent but nothing editorial. Do not publish.
+6: Publish — one floor qualifier OR enough positives accumulated
+7-8: Featured — strong qualifiers + good description
+9-10: Hero / Deal of Day — exceptional on multiple dimensions
 
-**Description Quality:**
-- Rich agent description with specific details, named features, local context: +0.5 to +1
-- Sparse description (3 sentences or fewer, no specifics): -1
-
----
-
-## NEGATIVE MODIFIERS
-
-These push the score down:
-
-- Manufactured home / mobile home / modular: -3 (rarely scores above 4)
-- Needs significant work with no renovation history mentioned: -1
-- No photos available: -1
-- Very small square footage (under 700 sqft): -1
-- Condo / HOA with high monthly fees mentioned: -0.5
-- Location with no distinguishing features mentioned: -0.5
-
----
-
-## SCORING BANDS
-
-**1-3: Skip** — Generic listing, no distinguishing features, manufactured home, bad data, or bare specs with nothing interesting. Do not publish.
-
-**4-5: Below threshold** — Decent listing but nothing that makes it editorially interesting. Solid specs but no story. Do not publish.
-
-**6: Minimum publish threshold** — Has at least one automatic qualifier OR has accumulated enough additive qualifiers to be genuinely interesting to a reader. Publish.
-
-**7: Strong listing** — One or more automatic qualifiers plus additional positive signals. Clear reader value. Publish, social post.
-
-**8: Featured listing** — Multiple strong qualifiers, great description, compelling deal. Publish, social post, email to paid subscribers.
-
-**9-10: Deal of the Day candidate** — Exceptional on multiple dimensions. Waterfront + renovation + acreage, or historic home with full character details, or new construction at an unusually low price. Publish, social reel, email ALL subscribers.
-
----
-
-## INPUT FORMAT
-
-You will receive:
-
-PRICE: [price as integer]
-ADDRESS: [street address]
-CITY: [city]
-STATE: [state abbreviation]
-BEDROOMS: [integer]
-BATHROOMS: [integer]
-SQFT: [integer]
-YEAR_BUILT: [integer]
-DAYS_ON_MARKET: [integer]
-PRICE_CHANGE: [decrease / none]
-LAST_STATUS: [New / Pc / etc]
-PROPERTY_TYPE: [type]
-STYLE: [architectural style]
-EXTERIOR: [exterior construction]
-POOL: [Y/N]
-WATERFRONT: [Y/N]
-ACREAGE: [decimal or null]
-AMENITIES: [list or null]
-DESCRIPTION: [full agent description]
-
----
-
-## OUTPUT FORMAT
-
-Respond in exactly this format, no other text:
-
+OUTPUT (exactly this format, no other text):
 SCORE: [1-10]
 TIER: [SKIP / BELOW_THRESHOLD / PUBLISH / FEATURED / HERO]
-CATEGORY: [one of: NEW_CONSTRUCTION / WATERFRONT / ACREAGE / HISTORIC / RENOVATED / CHARACTER / HIDDEN_GEM / TOO_GOOD_TO_BE_TRUE / WHAT_IF]
-KEY_HOOKS: [2-4 specific compelling facts about this listing, comma separated]
-REASON: [1-2 sentences explaining the score]
+CATEGORY: [NEW_CONSTRUCTION / WATERFRONT / ACREAGE / HISTORIC / RENOVATED / CHARACTER / HIDDEN_GEM / TOO_GOOD_TO_BE_TRUE / WHAT_IF]
+KEY_HOOKS: [2-4 specific compelling facts, comma separated]
+REASON: [1-2 sentences]
 DEAL_OF_DAY_CANDIDATE: [YES / NO]
 
----
-
-## TIER MAPPING
-
-- SCORE 1-3 → TIER: SKIP
-- SCORE 4-5 → TIER: BELOW_THRESHOLD
-- SCORE 6 → TIER: PUBLISH
-- SCORE 7-8 → TIER: FEATURED
-- SCORE 9-10 → TIER: HERO
-
----
-
-## CATEGORIES
-
-- NEW_CONSTRUCTION — Built within last 2 years
-- WATERFRONT — Any water frontage or water view
-- ACREAGE — Primary appeal is land / lot size
-- HISTORIC — Pre-1950 with notable character details
-- RENOVATED — Recently updated, key systems replaced
-- CHARACTER — Unique architectural features, charm, details
-- HIDDEN_GEM — Undervalued location, surprisingly good value
-- TOO_GOOD_TO_BE_TRUE — Price seems impossibly low for what's offered (use sparingly)
-- WHAT_IF — Acreage/land with development or lifestyle potential
-
----
-
-## NOTES
-
-- Be strict. A score of 6 should feel earned, not given.
-- The KEY_HOOKS are passed directly to the content generation prompt — make them specific and usable.
-- Do not score up a listing just because the price is low. Low price alone is not editorial.
-- Manufactured homes almost never score above 4 regardless of other factors.
-- A rich, detailed agent description elevates a borderline listing. A sparse description kills one.
-- When in doubt, score down. Volume can be adjusted. Quality cannot be recovered."""
+TIER MAP: 1-3=SKIP | 4-5=BELOW_THRESHOLD | 6=PUBLISH | 7-8=FEATURED | 9-10=HERO
+CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=land is story | HISTORIC=pre-1950 character | RENOVATED=updated systems | CHARACTER=unique details | HIDDEN_GEM=underrated value | TOO_GOOD_TO_BE_TRUE=price seems wrong | WHAT_IF=lifestyle/land fantasy"""
 
 
 CONTENT_PROMPT_TEMPLATE = """You are a writer for HousesUnder150K.com — a site that finds incredible real estate deals under $150,000 that most people never see. Your voice is enthusiastic but credible, like a knowledgeable friend who spotted an amazing deal and can't wait to tell you about it. Never hype, never fluff — just honest, specific, compelling storytelling about why this property is worth attention.
@@ -621,7 +497,6 @@ def parse_scoring_output(text: str) -> dict:
 def score_listing(listing: dict) -> dict | None:
     """
     Call Claude with scoring prompt. Returns parsed score dict or None on failure.
-    score dict keys: SCORE, TIER, CATEGORY, KEY_HOOKS, REASON, DEAL_OF_DAY_CANDIDATE
     """
     user_input = build_scoring_input(listing)
     raw = call_claude(SCORING_PROMPT, user_input, "scoring")
@@ -799,9 +674,7 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
     sqft       = parse_sqft(details.get("sqft"))
     year       = parse_int(details.get("yearBuilt"))
 
-    # listing-url = our page on the site
-    listing_url = f"https://housesunder150k.com/listings/{slug}"
-    # affiliate-url = Realtor.com address search (lands user near the listing)
+    listing_url   = f"https://housesunder150k.com/listings/{slug}"
     affiliate_url = make_realtor_url(addr)
 
     headline = content.get("HEADLINE", "")
@@ -901,31 +774,25 @@ def process_listing(listing: dict) -> str:
 
     log.info(f"--- Processing: {city} ${make_price_display(price)} (MLS {mls_num}) ---")
 
-    # Dedup check
     if slug_exists(slug):
         log.info(f"Skipping {slug} — already published")
         return "skipped_dedup"
 
-    # Call 1 — Score
     score_data = score_listing(listing)
     if not score_data:
         log.error(f"Scoring failed for {slug}")
         return "error"
 
     score = score_data.get("SCORE", 0)
-
-    # Discard 1-5
     if score <= 5:
         log.info(f"Score {score} <= 5 — discarding {slug}")
         return "skipped_score"
 
-    # Call 2 — Content generation
     content = generate_content(listing, score_data)
     if not content:
         log.error(f"Content generation failed for {slug}")
         return "error"
 
-    # Image — fetch images[0] from Repliers CDN, upload to Cloudflare
     images = listing.get("images", [])
     hero_image_url = None
     if images:
@@ -934,19 +801,15 @@ def process_listing(listing: dict) -> str:
         log.warning(f"No hero image for {slug} — proceeding without image")
         hero_image_url = ""
 
-    # Write to Webflow
     item_id = write_webflow(listing, score_data, content, hero_image_url)
     if not item_id:
         log.error(f"Webflow write failed for {slug}")
         return "error"
 
-    # Publish
-    published = publish_webflow(item_id)
-    if not published:
+    if not publish_webflow(item_id):
         log.error(f"Webflow publish failed for item {item_id}")
         return "error"
 
-    # Write dedup record
     write_post_record(slug, {
         "slug": slug,
         "mls_number": mls_num,
@@ -987,7 +850,6 @@ def run_pipeline():
             log.error(f"Unhandled error processing listing: {e}", exc_info=True)
             stats["error"] += 1
 
-        # Brief pause between listings to avoid hammering APIs
         time.sleep(1)
 
     elapsed = time.time() - start
