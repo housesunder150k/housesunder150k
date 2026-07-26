@@ -114,6 +114,7 @@ POSITIVE SIGNALS (accumulate to reach 6 without a floor qualifier):
 
 NEGATIVE MODIFIERS:
 - Manufactured/mobile/modular: -3
+- Condo/unit in multi-family complex: -2 (lot size reflects complex parcel, not buyer's land — ignore any acreage signal)
 - Needs major work, no renovation history: -1
 - No photos: -1
 - Under 700 sqft: -1
@@ -593,6 +594,9 @@ def build_scoring_input(listing: dict) -> str:
     year       = parse_int(details.get("yearBuilt"))
     dom        = parse_int(listing.get("daysOnMarket"))
     lot_acres  = details.get("lotAcres")
+    # Nullify acreage for small multi-unit properties — lot size is the complex parcel, not buyer's land
+    if lot_acres and beds <= 2 and sqft < 900:
+        lot_acres = None
     acreage    = str(lot_acres) if lot_acres else "null"
     waterfront = "Y" if details.get("waterfront") else "N"
     pool       = "Y" if details.get("pool") else "N"
