@@ -731,6 +731,9 @@ def parse_content_output(text: str) -> dict:
 
     for line in text.splitlines():
         stripped = line.strip()
+        # Match label with or without colon, and handle '---' separators
+        if stripped in ("---", "----"):
+            continue
         matched_label = next((l for l in labels if stripped == l or stripped == f"{l}:"), None)
         if matched_label:
             if current_label and current_lines:
@@ -742,6 +745,11 @@ def parse_content_output(text: str) -> dict:
 
     if current_label and current_lines:
         result[current_label] = "\n".join(current_lines).strip()
+
+    # Log a warning if key fields are empty
+    if not result["HEADLINE"] or not result["NARRATIVE"]:
+        log.warning(f"[CONTENT] parse_content_output missing fields — raw text snippet: {text[:200]}")
+
     return result
 
 
@@ -887,6 +895,32 @@ def publish_webflow(item_id: str) -> bool:
     return True
 
 
+WEBFLOW_SITE_ID       = "6a650a7eb2639262c4b6adb7"
+WEBFLOW_DOMAIN_IDS    = ["6a661987994ab168be06566b", "6a661986994ab168be065664"]
+
+
+def publish_site() -> bool:
+    """Trigger a full Webflow site publish to push CMS items live on the custom domain."""
+    headers = {
+        "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
+        "Content-Type": "application/json",
+        "accept": "application/json",
+    }
+    try:
+        r = requests.post(
+            f"{WEBFLOW_BASE}/sites/{WEBFLOW_SITE_ID}/publish",
+            headers=headers,
+            json={"customDomains": WEBFLOW_DOMAIN_IDS},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        log.error(f"Webflow site publish failed: {e}")
+        return False
+    log.info("Site published to housesunder150k.com")
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Per-listing pipeline
 # ---------------------------------------------------------------------------
@@ -927,6 +961,9 @@ def process_listing(listing: dict, today_ct: date) -> tuple[str, float]:
     content, content_cost = generate_content(listing, score_data)
     total_cost += content_cost
     if not content:
+        return "error", total_cost
+    if not content.get("HEADLINE") or not content.get("NARRATIVE"):
+        log.error(f"Content generation returned empty fields for {slug} — skipping Webflow write")
         return "error", total_cost
 
     images = listing.get("images", [])
@@ -1023,6 +1060,10 @@ def run_pipeline():
             "est_cost_usd": round(total_cost, 5),
             "daily_limit_hit": (count_today + published_this_run) >= DAILY_PUBLISH_LIMIT,
         })
+
+    # Full site publish to push new listings live on housesunder150k.com
+    if published_this_run > 0:
+        publish_site()
 
 
 if __name__ == "__main__":
