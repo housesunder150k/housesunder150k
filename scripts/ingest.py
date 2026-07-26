@@ -412,7 +412,7 @@ def fetch_search_results(state_name: str, result_count: int = 50) -> list[dict]:
         )
         r.raise_for_status()
         data = r.json()
-        results = data.get("data", {}).get("results", []) or data.get("results", []) or []
+        results = data.get("searchResults", [])
         log.info(f"Realtor.com [{state_name}]: {len(results)} results")
         return results
     except requests.RequestException as e:
@@ -437,70 +437,72 @@ def fetch_listing_details(property_id: str) -> dict | None:
 
 
 def extract_description(details: dict | None) -> str:
-    """Extract listing description from details/byid response."""
+    """Extract listing description from Realtor.com details/byid response."""
     if not details:
         return ""
-    # Realtor.com nests data — try common paths
-    data = details.get("data") or details
+    # Response root is 'detail', description is at detail.details.text
+    detail = details.get("detail") or details
+    inner = detail.get("details") or {}
     candidates = [
-        data.get("description", {}).get("text", "") if isinstance(data.get("description"), dict) else data.get("description", ""),
-        data.get("remarks", ""),
-        data.get("publicRemarks", ""),
-        (data.get("details") or {}).get("description", ""),
-        (data.get("details") or {}).get("remarks", ""),
-        (data.get("listing") or {}).get("description", ""),
-        (data.get("listing") or {}).get("remarks", ""),
+        inner.get("text", ""),
+        detail.get("description", ""),
+        detail.get("remarks", ""),
+        detail.get("publicRemarks", ""),
     ]
     return next((c for c in candidates if isinstance(c, str) and len(c) > 10), "")
 
 
+def extract_year_built(details: dict | None) -> int:
+    """Extract year built from Realtor.com details/byid response."""
+    if not details:
+        return 0
+    detail = details.get("detail") or details
+    inner = detail.get("details") or {}
+    return parse_int(inner.get("year_built") or 0)
+
+
 def normalize_listing(result: dict, description: str) -> dict | None:
     """Normalize a Realtor.com search result into the pipeline's listing dict."""
-    # Realtor.com field paths
-    prop = result.get("property_id", "") or result.get("propertyId", "")
-    listing_id = result.get("listing_id", "") or result.get("listingId", "")
-    mls_id = result.get("mls_id", "") or result.get("mlsId", "") or prop
+    prop = result.get("property_id", "")
+    listing_id = result.get("listing_id", "")
+    mls_id = prop  # use property_id as unique identifier
 
-    if not prop or not mls_id:
+    if not prop:
         return None
 
-    # Location
-    location = result.get("location", {}) or {}
-    address = location.get("address", {}) or {}
+    # Address — flat on result
+    address = result.get("address", {}) or {}
     street = address.get("line", "") or ""
     city = address.get("city", "") or ""
-    state_abbr = address.get("state_code", "") or address.get("state", "") or ""
+    state_abbr = address.get("state_code", "") or ""
     zip_code = address.get("postal_code", "") or ""
     state_full = STATE_FULL_NAME.get(state_abbr, state_abbr)
 
-    # Price
-    list_price = parse_int(
-        result.get("list_price") or
-        result.get("price") or
-        (result.get("priceInfo") or {}).get("amount", 0)
-    )
-
-    # Specs
-    desc_block = result.get("description", {}) or {}
-    beds = parse_int(desc_block.get("beds") or result.get("beds") or 0)
-    baths = parse_int(desc_block.get("baths") or result.get("baths") or 0)
-    sqft = parse_int(desc_block.get("sqft") or result.get("sqft") or 0)
-    year_built = parse_int(desc_block.get("year_built") or result.get("year_built") or 0)
-    lot_sqft = parse_int(desc_block.get("lot_sqft") or result.get("lot_sqft") or 0)
+    # Price, specs — top-level fields
+    list_price = parse_int(result.get("list_price") or 0)
+    beds = parse_int(result.get("beds") or 0)
+    baths = parse_int(result.get("baths") or 0)
+    sqft = parse_int(result.get("sqft") or 0)
+    lot_sqft = parse_int(result.get("lot_sqft") or 0)
     lot_acres = round(lot_sqft / 43560, 2) if lot_sqft else None
 
-    # DOM
-    dom = parse_int(result.get("list_date_delta") or result.get("daysOnMarket") or 0)
+    # Year built not in search results — will be null until detail call enriches it
+    year_built = 0
 
-    # Photos
+    # DOM — derive from list_date if available
+    dom = 0
+
+    # Photos — plain URL strings
     photos = []
-    primary = result.get("primary_photo", {}) or {}
-    if primary.get("href"):
+    primary = result.get("primary_photo", "")
+    if isinstance(primary, str) and primary:
+        photos.append(primary)
+    elif isinstance(primary, dict) and primary.get("href"):
         photos.append(primary["href"])
     for photo in (result.get("photos") or []):
-        href = photo.get("href", "") if isinstance(photo, dict) else ""
-        if href and href not in photos:
-            photos.append(href)
+        url = photo if isinstance(photo, str) else (photo.get("href", "") if isinstance(photo, dict) else "")
+        if url and url not in photos:
+            photos.append(url)
 
     # Waterfront/pool from description
     desc_lower = description.lower()
@@ -543,6 +545,7 @@ def fetch_listings() -> list[dict]:
     Uses Realtor.com via RealtyAPI for nationwide coverage.
     Fetches full details per listing to get description.
     Returns normalized listing dicts.
+    Max 1 publishable candidate per state to ensure geographic diversity.
     """
     target = 50
     collected = []
@@ -559,23 +562,32 @@ def fetch_listings() -> list[dict]:
         if not results:
             continue
 
+        state_published = False
+
         for result in results:
             if len(collected) >= target:
+                break
+            if state_published:
                 break
 
             prop_id = result.get("property_id", "") or result.get("propertyId", "")
             if not prop_id or prop_id in seen_ids:
                 continue
 
-            # Fetch full details for description
+            # Fetch full details for description and year built
             details = fetch_listing_details(prop_id)
             time.sleep(0.2)
 
             description = extract_description(details)
+            year_built = extract_year_built(details)
 
             listing = normalize_listing(result, description)
             if not listing:
                 continue
+
+            # Enrich with year_built from detail call
+            listing["details"]["yearBuilt"] = year_built
+            listing["_state"] = state  # track for diversity flag
 
             # Skip if price is 0 or missing
             if listing["listPrice"] <= 0:
@@ -583,6 +595,7 @@ def fetch_listings() -> list[dict]:
 
             seen_ids.add(prop_id)
             collected.append(listing)
+            state_published = True  # move to next state after first candidate
 
     log.info(f"Fetched {len(collected)} total listings")
     return collected
