@@ -493,6 +493,9 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     # Year built not in search results — will be null until detail call enriches it
     year_built = 0
 
+    # Direct listing URL
+    listing_href = result.get("href", "")
+
     # DOM — derive from list_date if available
     dom = 0
 
@@ -520,6 +523,7 @@ def normalize_listing(result: dict, description: str) -> dict | None:
         "mlsNumber": mls_id,
         "propertyId": prop,
         "listingId": listing_id,
+        "listingHref": listing_href,
         "listPrice": list_price,
         "daysOnMarket": dom,
         "address": {
@@ -846,7 +850,7 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "narrative-body":   format_richtext(content.get("NARRATIVE", "")),
         "short-summary":    content.get("SHORT_SUMMARY", ""),
         "listing-url":      f"https://housesunder150k.com/listings/{slug}",
-        "affiliate-url":    make_realtor_url(address, city, state_abbr, zip_code),
+        "affiliate-url":    listing.get("listingHref") or make_realtor_url(address, city, state_abbr, zip_code),
         "social-caption":   content.get("SOCIAL_CAPTION", ""),
         "status":           WF_STATUS_ACTIVE,
         "deal-of-the-day":  is_hero,
