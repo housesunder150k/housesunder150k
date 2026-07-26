@@ -436,16 +436,17 @@ def extract_description(details: dict | None) -> str:
     """Extract listing description from detailsbyid response."""
     if not details:
         return ""
-    log.info(f"[DEBUG] details keys: {list(details.keys())}")
     inner = details.get("details") or {}
-    log.info(f"[DEBUG] inner keys: {list(inner.keys()) if isinstance(inner, dict) else type(inner)}")
     candidates = [
+        inner.get("remarks", ""),
+        inner.get("description", ""),
+        inner.get("publicRemarks", ""),
+        inner.get("listingRemarks", ""),
+        (inner.get("listingInfo") or {}).get("remarks", ""),
+        (inner.get("payload") or {}).get("remarks", ""),
         details.get("remarks", ""),
         details.get("description", ""),
         details.get("publicRemarks", ""),
-        (details.get("payload") or {}).get("remarks", ""),
-        (details.get("payload") or {}).get("publicRemarks", ""),
-        (details.get("listingInfo") or {}).get("remarks", ""),
     ]
     return next((c for c in candidates if c and len(c) > 10), "")
 
