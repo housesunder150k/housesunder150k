@@ -115,11 +115,15 @@ POSITIVE SIGNALS (accumulate to reach 6 without a floor qualifier):
 NEGATIVE MODIFIERS:
 - Manufactured/mobile/modular: -3
 - Condo/unit in multi-family complex: -2 (lot size reflects complex parcel, not buyer's land — ignore any acreage signal)
+- Cash only / sold as-is AND no floor qualifier (no acreage, waterfront, historic character, views, or architectural value): -2 (distressed dump with no story for our audience)
 - Needs major work, no renovation history: -1
 - No photos: -1
 - Under 700 sqft: -1
 - HOA with high fees: -0.5
 - Sparse description (3 sentences or fewer): -1
+
+AUDIENCE CHECK (apply before publishing):
+This site serves first-time buyers, remote workers, retirees — people with conventional financing and modest savings. If a listing requires cash, contractor skills, or investor experience to be viable, it should NOT publish regardless of other signals. Ask: can a regular person with a mortgage actually buy and live in this? If no, maximum score is 4.
 
 SCORING BANDS:
 1-3: Skip — no story, bad data, manufactured home
