@@ -435,6 +435,7 @@ def extract_description(details: dict | None) -> str:
     """Extract listing description from detailsbyid response."""
     if not details:
         return ""
+    log.info(f"[DEBUG] details keys: {list(details.keys())}")
     candidates = [
         details.get("remarks", ""),
         details.get("description", ""),
