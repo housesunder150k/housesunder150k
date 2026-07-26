@@ -91,6 +91,10 @@ STATE_FULL_NAME = {
 
 SCORING_PROMPT = """Score this residential listing for HousesUnder150K.com on editorial merit (1-10). Be strict — most listings score 4 or below. Only genuinely interesting listings score 6+. Low price alone is never enough.
 
+AUDIENCE: First-time buyers, remote workers, retirees — people with conventional financing and modest savings. They are dreamers who want to believe affordable homeownership is still possible. The listing must be something a regular person with a standard mortgage can actually buy and live in. If it requires cash, contractor skills, or investor experience to be viable, maximum score is 4 regardless of other signals.
+
+EDITORIAL STANDARD: We are a curated media site, not a listing aggregator. Every published listing must have a story — a reason a reader would stop scrolling and say "wait, tell me more." Price alone is not a story. Square footage alone is not a story. A 1920 farmhouse on 3 acres with original hardwood floors and a creek running through the back — that's a story. Ask yourself: would a knowledgeable friend text this to someone they care about?
+
 AUTOMATIC 6+ FLOOR (any one qualifies):
 - Waterfront / lake / river / ocean / creek
 - Lake view or mountain view
@@ -105,12 +109,15 @@ POSITIVE SIGNALS (accumulate to reach 6 without a floor qualifier):
 - Sqft: <800 = -1 | 800-1100 = neutral | 1100-1400 = +0.5 | 1400-1800 = +1 | 1800+ = +1.5
 - Beds: 4 = +0.5 | 5+ = +1
 - Garage, outbuildings, barn, workshop
-- Character features: stained glass, exposed beams, hardwood, wraparound porch, clawfoot tub, built-ins, tin ceilings, wainscoting, fireplace
+- Character features: stained glass, exposed beams, hardwood, wraparound porch, clawfoot tub, built-ins, tin ceilings, wainscoting, fireplace, crown molding, original doors
 - Finished basement
-- Named nearby amenities, trails, parks, charming town
-- Price reduction signal in description
-- High days on market + low price
+- Named nearby amenities, trails, parks, charming town, university, lake access
+- Price reduction signal in description — someone motivated to sell
+- High days on market + low price — hidden gem potential
 - Rich agent description with specifics: +0.5 to +1
+- Unusual or distinctive architecture: castle, craftsman, Victorian, Tudor, log cabin, stone construction
+- Price-per-sqft under $50: notable value signal worth mentioning
+- Income potential: legal accessory dwelling, rental history, Airbnb suitability in described location
 
 NEGATIVE MODIFIERS:
 - Manufactured/mobile/modular: -3
@@ -121,16 +128,23 @@ NEGATIVE MODIFIERS:
 - Under 700 sqft: -1
 - HOA with high fees: -0.5
 - Sparse description (3 sentences or fewer): -1
+- Investor/flipper language ("bring your vision", "investor special", "as-is opportunity"): -1
+- Flood zone AE (required flood insurance — affects mortgage qualification): -0.5
 
-AUDIENCE CHECK (apply before publishing):
-This site serves first-time buyers, remote workers, retirees — people with conventional financing and modest savings. If a listing requires cash, contractor skills, or investor experience to be viable, it should NOT publish regardless of other signals. Ask: can a regular person with a mortgage actually buy and live in this? If no, maximum score is 4.
+AS-IS EXCEPTION: As-is is fine when the property has historic significance, significant acreage, waterfront access, or genuine architectural value. A 130-year-old stone farmhouse on 10 acres sold as-is is still a 7. A 1973 ranch with no description sold as-is is a 2.
+
+SCORING PRECISION NOTES:
+- Read descriptions carefully for hidden signals. "Motivated seller" = price flexibility. "Estate sale" = potential underpricing. "Original details throughout" = character. "Needs TLC" without specifics = deduct.
+- Year built matters: pre-1900 = likely character details even if not described. 1950-1975 = solid bones, nothing distinctive. Post-2000 = check for updates.
+- Location context matters even without description. A $60K house in a college town is more interesting than the same house in an industrial suburb.
+- Photos count. A listing with 25+ photos is telling you more than one with 3.
 
 SCORING BANDS:
-1-3: Skip — no story, bad data, manufactured home
-4-5: Below threshold — decent but nothing editorial. Do not publish.
-6: Publish — one floor qualifier OR enough positives accumulated
-7-8: Featured — strong qualifiers + good description
-9-10: Hero / Deal of Day — exceptional on multiple dimensions
+1-3: Skip — no story, bad data, manufactured home, investor dump
+4-5: Below threshold — decent home, nothing editorial. Do not publish.
+6: Publish — one floor qualifier OR compelling accumulation of positives
+7-8: Featured — strong floor qualifier + good description + clear story
+9-10: Hero / Deal of Day — exceptional on multiple dimensions, stops the scroll
 
 OUTPUT (exactly this format, no other text):
 SCORE: [1-10]
@@ -617,12 +631,19 @@ def call_claude(system: str, user: str, call_name: str) -> tuple[str | None, flo
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
+        "anthropic-beta": "prompt-caching-2024-07-31",
         "content-type": "application/json",
     }
     body = {
         "model": CLAUDE_MODEL,
         "max_tokens": CLAUDE_MAX_TOKENS,
-        "system": system,
+        "system": [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         "messages": [{"role": "user", "content": user}],
     }
     try:
@@ -634,6 +655,10 @@ def call_claude(system: str, user: str, call_name: str) -> tuple[str | None, flo
 
     data = r.json()
     usage = data.get("usage", {})
+    cache_read = usage.get("cache_read_input_tokens", 0)
+    cache_write = usage.get("cache_creation_input_tokens", 0)
+    if cache_read or cache_write:
+        log.info(f"[CACHE] {call_name} | read={cache_read} write={cache_write}")
     cost = log_tokens(call_name, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
     content_blocks = data.get("content", [])
     text_blocks = [b["text"] for b in content_blocks if b.get("type") == "text"]
