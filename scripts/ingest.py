@@ -2,18 +2,17 @@
 HousesUnder150K.com — Ingestion Pipeline
 Runs on Railway 3x/day: 8am, 1pm, 6pm CT
 Fetches listings from Repliers, scores, generates content, publishes to Webflow.
+Dedup, daily limit, and seen-listing suppression via Supabase.
 """
 
 import os
-import sys
-import json
 import re
 import time
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
+from datetime import datetime, timezone, date
 
 import requests
+import pytz
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -37,6 +36,9 @@ CLOUDFLARE_ACCOUNT_ID  = os.environ["CLOUDFLARE_ACCOUNT_ID"]
 WEBFLOW_API_TOKEN      = os.environ["WEBFLOW_API_TOKEN"]
 WEBFLOW_COLLECTION_ID  = os.environ["WEBFLOW_COLLECTION_ID"]
 SOVRN_AFFILIATE_URL    = os.environ["SOVRN_AFFILIATE_URL"]
+SUPABASE_URL           = os.environ["SUPABASE_URL"]
+SUPABASE_KEY           = os.environ["SUPABASE_KEY"]
+DAILY_PUBLISH_LIMIT    = int(os.environ.get("DAILY_PUBLISH_LIMIT", "10"))
 
 CLAUDE_MODEL           = "claude-sonnet-4-6"
 CLAUDE_MAX_TOKENS      = 1000
@@ -47,9 +49,8 @@ CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDF
 CF_DELIVERY_BASE       = "https://imagedelivery.net/VbqNe4WDJ-oPFPFAkDRv_w"
 WEBFLOW_BASE           = "https://api.webflow.com/v2"
 
-# Posts directory — one JSON file per published slug (dedup layer)
-POSTS_DIR = Path(__file__).parent.parent / "posts"
-POSTS_DIR.mkdir(exist_ok=True)
+SEEN_SUPPRESSION_DAYS  = 7   # Days to suppress re-scoring of discarded listings
+CT_TZ                  = pytz.timezone("America/Chicago")
 
 # Webflow field IDs
 WF_FIELDS = {
@@ -96,7 +97,6 @@ STATE_ABBREV = {
     "South Dakota": "SD", "Tennessee": "TN", "Texas": "TX", "Utah": "UT",
     "Vermont": "VT", "Virginia": "VA", "Washington": "WA", "West Virginia": "WV",
     "Wisconsin": "WI", "Wyoming": "WY", "District of Columbia": "DC",
-    # Canadian provinces (test data may include these)
     "Ontario": "ON", "Quebec": "QC", "British Columbia": "BC", "Alberta": "AB",
     "Manitoba": "MB", "Saskatchewan": "SK", "Nova Scotia": "NS",
     "New Brunswick": "NB", "Newfoundland and Labrador": "NL",
@@ -223,11 +223,15 @@ Return all four outputs with those exact labels. Nothing else."""
 
 
 # ---------------------------------------------------------------------------
-# Parsing helpers
+# Helpers
 # ---------------------------------------------------------------------------
 
+def get_today_ct() -> date:
+    """Return today's date in CT timezone."""
+    return datetime.now(CT_TZ).date()
+
+
 def parse_price(raw) -> int:
-    """'5961.00' or 105000 → 105000"""
     try:
         return int(float(str(raw)))
     except (ValueError, TypeError):
@@ -235,7 +239,6 @@ def parse_price(raw) -> int:
 
 
 def parse_sqft(raw) -> int:
-    """'1000-1100' → 1050, or '1200' → 1200, or 1200 → 1200"""
     if raw is None:
         return 0
     s = str(raw).strip()
@@ -274,35 +277,26 @@ def state_abbrev(full_name: str) -> str:
 
 
 def make_slug(city: str, price: int) -> str:
-    """'Milwaukee', 105000 → 'milwaukee-105000' — matches existing pattern"""
     city_slug = re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
     return f"{city_slug}-{price}"
 
 
 def make_price_display(price: int) -> str:
-    """105000 → '105,000'"""
     return f"{price:,}"
 
 
 def format_richtext(text: str) -> str:
-    """Wrap narrative paragraphs in Webflow richtext HTML"""
     paragraphs = [p.strip() for p in text.strip().split("\n\n") if p.strip()]
     return "".join(f"<p>{p}</p>" for p in paragraphs)
 
 
 def make_realtor_url(addr: dict) -> str:
-    """
-    Construct a Realtor.com address search URL from listing address fields.
-    Format: https://www.realtor.com/realestateandhomes-search/Street_City_State_Zip
-    Falls back to city+state search if no street available.
-    """
     street_num  = str(addr.get("streetNumber", "") or "").strip()
     street_name = str(addr.get("streetName", "") or "").strip()
     street_suf  = str(addr.get("streetSuffix", "") or "").strip()
     city        = str(addr.get("city", "") or "").strip()
     state       = str(addr.get("state", "") or "").strip()
     zip_code    = str(addr.get("zip", "") or "").strip()
-
     state_abbr  = state_abbrev(state)
 
     def slugify(s: str) -> str:
@@ -323,26 +317,174 @@ def make_realtor_url(addr: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Supabase — all DB operations
+# ---------------------------------------------------------------------------
+
+def _sb_headers() -> dict:
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def db_count_published_today(today_ct: date) -> int:
+    """Count listings published today in CT timezone."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    params = {
+        "select": "slug",
+        "published_date_ct": f"eq.{today_ct.isoformat()}",
+    }
+    headers = _sb_headers()
+    headers["Prefer"] = "count=exact"
+    headers["Range-Unit"] = "items"
+    headers["Range"] = "0-0"
+    try:
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        r.raise_for_status()
+        content_range = r.headers.get("Content-Range", "0/0")
+        total = content_range.split("/")[-1]
+        return int(total) if total != "*" else 0
+    except Exception as e:
+        log.error(f"Supabase count_published_today error: {e}")
+        return 0
+
+
+def db_slug_published(slug: str) -> bool:
+    """Check if slug already exists in published_listings."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    params = {"select": "slug", "slug": f"eq.{slug}", "limit": 1}
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        return len(r.json()) > 0
+    except Exception as e:
+        log.error(f"Supabase slug_published error: {e}")
+        return False
+
+
+def db_mls_seen_recently(mls_number: str) -> dict | None:
+    """
+    Return seen_listings row if this MLS number was seen within suppression window.
+    Returns None if not seen or seen too long ago.
+    """
+    from datetime import timedelta
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
+    url = f"{SUPABASE_URL}/rest/v1/seen_listings"
+    params = {
+        "select": "*",
+        "mls_number": f"eq.{mls_number}",
+        "last_seen_at": f"gte.{cutoff}",
+        "limit": 1,
+    }
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+    except Exception as e:
+        log.error(f"Supabase mls_seen_recently error: {e}")
+        return None
+
+
+def db_upsert_seen(mls_number: str, slug: str, score: int, tier: str) -> None:
+    """Insert or update seen_listings for this MLS number."""
+    url = f"{SUPABASE_URL}/rest/v1/seen_listings"
+    headers = _sb_headers()
+    headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
+    payload = {
+        "mls_number": mls_number,
+        "slug": slug,
+        "score": score,
+        "tier": tier,
+        "last_seen_at": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        log.error(f"Supabase upsert_seen error: {e}")
+
+
+def db_insert_published(
+    slug: str, mls_number: str, webflow_item_id: str,
+    score: int, tier: str, category: str, headline: str,
+    hero_image_url: str, today_ct: date
+) -> None:
+    """Insert into published_listings."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    payload = {
+        "slug": slug,
+        "mls_number": mls_number,
+        "webflow_item_id": webflow_item_id,
+        "score": score,
+        "tier": tier,
+        "category": category,
+        "headline": headline,
+        "hero_image_url": hero_image_url,
+        "published_at": datetime.now(timezone.utc).isoformat(),
+        "published_date_ct": today_ct.isoformat(),
+    }
+    try:
+        r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        log.error(f"Supabase insert_published error: {e}")
+
+
+def db_insert_run(run_data: dict) -> int | None:
+    """Insert a pipeline_runs row, return the new id."""
+    url = f"{SUPABASE_URL}/rest/v1/pipeline_runs"
+    headers = _sb_headers()
+    headers["Prefer"] = "return=representation"
+    try:
+        r = requests.post(url, headers=headers, json=run_data, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0]["id"] if rows else None
+    except Exception as e:
+        log.error(f"Supabase insert_run error: {e}")
+        return None
+
+
+def db_update_run(run_id: int, update_data: dict) -> None:
+    """Update a pipeline_runs row by id."""
+    url = f"{SUPABASE_URL}/rest/v1/pipeline_runs"
+    params = {"id": f"eq.{run_id}"}
+    try:
+        r = requests.patch(url, headers=_sb_headers(), params=params, json=update_data, timeout=10)
+        r.raise_for_status()
+    except Exception as e:
+        log.error(f"Supabase update_run error: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Token logging
+# ---------------------------------------------------------------------------
+
+def log_tokens(call_name: str, input_tokens: int, output_tokens: int) -> float:
+    cost = (input_tokens / 1000 * COST_PER_1K_INPUT) + \
+           (output_tokens / 1000 * COST_PER_1K_OUTPUT)
+    log.info(
+        f"[TOKENS] {call_name} | in={input_tokens} out={output_tokens} "
+        f"| est_cost=${cost:.5f}"
+    )
+    return cost
+
+
+# ---------------------------------------------------------------------------
 # Repliers API
 # ---------------------------------------------------------------------------
 
-def fetch_listings(last_run_timestamp: str | None = None) -> list[dict]:
-    """
-    Fetch active listings under $150K from Repliers.
-    last_run_timestamp: ISO8601 string — if provided, only fetch updated since then.
-    Returns list of raw listing dicts.
-    """
+def fetch_listings() -> list[dict]:
     params = {
         "status": "A",
         "maxPrice": 150000,
         "resultsPerPage": 50,
         "sortBy": "updatedOnDesc",
     }
-    if last_run_timestamp:
-        params["minUpdatedOn"] = last_run_timestamp
-
     headers = {"REPLIERS-API-KEY": REPLIERS_API_KEY}
-
     log.info("Fetching listings from Repliers (maxPrice=150000, status=A)...")
     try:
         r = requests.get(
@@ -355,7 +497,6 @@ def fetch_listings(last_run_timestamp: str | None = None) -> list[dict]:
     except requests.RequestException as e:
         log.error(f"Repliers fetch failed: {e}")
         return []
-
     data = r.json()
     listings = data.get("listings", [])
     total = data.get("count", len(listings))
@@ -364,40 +505,11 @@ def fetch_listings(last_run_timestamp: str | None = None) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Dedup
-# ---------------------------------------------------------------------------
-
-def slug_exists(slug: str) -> bool:
-    return (POSTS_DIR / f"{slug}.json").exists()
-
-
-def write_post_record(slug: str, data: dict) -> None:
-    path = POSTS_DIR / f"{slug}.json"
-    path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    log.info(f"Wrote post record: posts/{slug}.json")
-
-
-# ---------------------------------------------------------------------------
-# Token logging
-# ---------------------------------------------------------------------------
-
-def log_tokens(call_name: str, input_tokens: int, output_tokens: int) -> None:
-    cost = (input_tokens / 1000 * COST_PER_1K_INPUT) + \
-           (output_tokens / 1000 * COST_PER_1K_OUTPUT)
-    log.info(
-        f"[TOKENS] {call_name} | in={input_tokens} out={output_tokens} "
-        f"| est_cost=${cost:.5f}"
-    )
-
-
-# ---------------------------------------------------------------------------
 # Claude API
 # ---------------------------------------------------------------------------
 
-def call_claude(system: str, user: str, call_name: str) -> str | None:
-    """
-    POST to Anthropic /v1/messages. Logs token usage. Returns text content or None.
-    """
+def call_claude(system: str, user: str, call_name: str) -> tuple[str | None, float]:
+    """Returns (text, cost)."""
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
@@ -409,21 +521,20 @@ def call_claude(system: str, user: str, call_name: str) -> str | None:
         "system": system,
         "messages": [{"role": "user", "content": user}],
     }
-
     try:
         r = requests.post(ANTHROPIC_BASE, headers=headers, json=body, timeout=60)
         r.raise_for_status()
     except requests.RequestException as e:
         log.error(f"Claude API error ({call_name}): {e}")
-        return None
+        return None, 0.0
 
     data = r.json()
     usage = data.get("usage", {})
-    log_tokens(call_name, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
-
+    cost = log_tokens(call_name, usage.get("input_tokens", 0), usage.get("output_tokens", 0))
     content_blocks = data.get("content", [])
     text_blocks = [b["text"] for b in content_blocks if b.get("type") == "text"]
-    return "\n".join(text_blocks).strip() if text_blocks else None
+    text = "\n".join(text_blocks).strip() if text_blocks else None
+    return text, cost
 
 
 # ---------------------------------------------------------------------------
@@ -436,17 +547,16 @@ def build_scoring_input(listing: dict) -> str:
     lot     = listing.get("lot", {})
     nearby  = listing.get("nearby", {})
 
-    price   = parse_price(listing.get("listPrice", 0))
-    address = build_address(addr)
-    city    = addr.get("city", "")
-    state_full = addr.get("state", "")
-    state   = state_abbrev(state_full)
-    beds    = parse_int(details.get("numBedrooms"))
-    baths   = parse_int(details.get("numBathrooms"))
-    sqft    = parse_sqft(details.get("sqft"))
-    year    = parse_int(details.get("yearBuilt"))
-    dom     = parse_int(listing.get("daysOnMarket"))
-
+    price        = parse_price(listing.get("listPrice", 0))
+    address      = build_address(addr)
+    city         = addr.get("city", "")
+    state_full   = addr.get("state", "")
+    state        = state_abbrev(state_full)
+    beds         = parse_int(details.get("numBedrooms"))
+    baths        = parse_int(details.get("numBathrooms"))
+    sqft         = parse_sqft(details.get("sqft"))
+    year         = parse_int(details.get("yearBuilt"))
+    dom          = parse_int(listing.get("daysOnMarket"))
     price_change = listing.get("lastPriceChangeType", "none") or "none"
     last_status  = listing.get("lastStatus", "") or ""
     prop_type    = details.get("propertyType", "") or ""
@@ -454,14 +564,11 @@ def build_scoring_input(listing: dict) -> str:
     exterior     = details.get("exteriorConstruction1", "") or ""
     pool         = "Y" if str(details.get("swimmingPool", "")).upper() == "Y" else "N"
     waterfront   = "Y" if str(details.get("waterfront", "")).upper() == "Y" else "N"
-
-    acres_raw = lot.get("acres")
-    acreage = str(round(float(acres_raw), 2)) if acres_raw else "null"
-
-    amenities = nearby.get("amenities", [])
+    acres_raw    = lot.get("acres")
+    acreage      = str(round(float(acres_raw), 2)) if acres_raw else "null"
+    amenities    = nearby.get("amenities", [])
     amenities_str = ", ".join(amenities) if amenities else "null"
-
-    description = details.get("description", "") or "(no description)"
+    description  = details.get("description", "") or "(no description)"
 
     return f"""PRICE: {price}
 ADDRESS: {address}
@@ -485,7 +592,6 @@ DESCRIPTION: {description}"""
 
 
 def parse_scoring_output(text: str) -> dict:
-    """Parse the structured scoring response into a dict."""
     result = {}
     for line in text.splitlines():
         if ":" in line:
@@ -494,14 +600,12 @@ def parse_scoring_output(text: str) -> dict:
     return result
 
 
-def score_listing(listing: dict) -> dict | None:
-    """
-    Call Claude with scoring prompt. Returns parsed score dict or None on failure.
-    """
+def score_listing(listing: dict) -> tuple[dict | None, float]:
+    """Returns (score_data, cost)."""
     user_input = build_scoring_input(listing)
-    raw = call_claude(SCORING_PROMPT, user_input, "scoring")
+    raw, cost = call_claude(SCORING_PROMPT, user_input, "scoring")
     if not raw:
-        return None
+        return None, cost
     parsed = parse_scoring_output(raw)
     score_val = parse_int(parsed.get("SCORE", "0"))
     parsed["SCORE"] = score_val
@@ -509,60 +613,45 @@ def score_listing(listing: dict) -> dict | None:
         f"Score: {score_val} | Tier: {parsed.get('TIER')} | "
         f"Category: {parsed.get('CATEGORY')} | {parsed.get('REASON', '')[:80]}"
     )
-    return parsed
+    return parsed, cost
 
 
 # ---------------------------------------------------------------------------
 # Call 2 — Content generation
 # ---------------------------------------------------------------------------
 
-def generate_content(listing: dict, score_data: dict) -> dict | None:
-    """
-    Call Claude with content prompt. Returns dict with HEADLINE, NARRATIVE,
-    SOCIAL_CAPTION, SHORT_SUMMARY, or None on failure.
-    """
+def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, float]:
+    """Returns (content, cost)."""
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
-    price        = parse_price(listing.get("listPrice", 0))
-    address      = build_address(addr)
-    city         = addr.get("city", "")
-    state_full   = addr.get("state", "")
-    beds         = parse_int(details.get("numBedrooms"))
-    baths        = parse_int(details.get("numBathrooms"))
-    sqft         = parse_sqft(details.get("sqft"))
-    year_built   = parse_int(details.get("yearBuilt"))
-    description  = details.get("description", "") or "(no description)"
+    price       = parse_price(listing.get("listPrice", 0))
+    address     = build_address(addr)
+    city        = addr.get("city", "")
+    state_full  = addr.get("state", "")
+    beds        = parse_int(details.get("numBedrooms"))
+    baths       = parse_int(details.get("numBathrooms"))
+    sqft        = parse_sqft(details.get("sqft"))
+    year_built  = parse_int(details.get("yearBuilt"))
+    description = details.get("description", "") or "(no description)"
 
     prompt = CONTENT_PROMPT_TEMPLATE.format(
-        address=address,
-        city=city,
-        state_full=state_full,
+        address=address, city=city, state_full=state_full,
         price_display=make_price_display(price),
-        bedrooms=beds,
-        bathrooms=baths,
-        sqft=sqft,
-        year_built=year_built,
+        bedrooms=beds, bathrooms=baths, sqft=sqft, year_built=year_built,
         category=score_data.get("CATEGORY", ""),
         key_hooks=score_data.get("KEY_HOOKS", ""),
         description=description,
     )
-
-    raw = call_claude("You are a real estate content writer.", prompt, "content_gen")
+    raw, cost = call_claude("You are a real estate content writer.", prompt, "content_gen")
     if not raw:
-        return None
-
-    return parse_content_output(raw)
+        return None, cost
+    return parse_content_output(raw), cost
 
 
 def parse_content_output(text: str) -> dict:
-    """
-    Parse labeled sections from content generation output.
-    Handles both 'LABEL\ncontent' and 'LABEL: content' formats.
-    """
     result = {"HEADLINE": "", "NARRATIVE": "", "SOCIAL_CAPTION": "", "SHORT_SUMMARY": ""}
     labels = list(result.keys())
-
     current_label = None
     current_lines = []
 
@@ -573,7 +662,6 @@ def parse_content_output(text: str) -> dict:
             if stripped == label or stripped == f"{label}:":
                 matched_label = label
                 break
-
         if matched_label:
             if current_label and current_lines:
                 result[current_label] = "\n".join(current_lines).strip()
@@ -585,7 +673,6 @@ def parse_content_output(text: str) -> dict:
 
     if current_label and current_lines:
         result[current_label] = "\n".join(current_lines).strip()
-
     return result
 
 
@@ -594,19 +681,14 @@ def parse_content_output(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def upload_image(image_url: str, slug: str) -> str | None:
-    """
-    Fetch image from MLS URL, upload to Cloudflare Images.
-    Returns permanent delivery URL or None on failure.
-    """
     if "imagedelivery.net" in image_url:
-        log.info(f"Image already on Cloudflare, skipping upload: {image_url}")
+        log.info(f"Image already on Cloudflare, skipping: {image_url}")
         return image_url
 
-    # Repliers returns relative paths — prepend CDN base
     if not image_url.startswith("http"):
         image_url = f"{REPLIERS_CDN}/{image_url}"
 
-    log.info(f"Fetching image from MLS: {image_url}")
+    log.info(f"Fetching image: {image_url}")
     try:
         img_response = requests.get(image_url, timeout=30)
         img_response.raise_for_status()
@@ -615,37 +697,33 @@ def upload_image(image_url: str, slug: str) -> str | None:
         return None
 
     content_type = img_response.headers.get("content-type", "image/jpeg")
-    filename = f"{slug}.jpg"
-
-    log.info(f"Uploading image to Cloudflare Images ({len(img_response.content)} bytes)...")
+    log.info(f"Uploading to Cloudflare Images ({len(img_response.content)} bytes)...")
     try:
         cf_response = requests.post(
             CF_IMAGES_BASE,
             headers={"Authorization": f"Bearer {CLOUDFLARE_API_TOKEN}"},
-            files={"file": (filename, img_response.content, content_type)},
+            files={"file": (f"{slug}.jpg", img_response.content, content_type)},
             timeout=60,
         )
         cf_response.raise_for_status()
     except requests.RequestException as e:
-        log.error(f"Cloudflare Images upload failed: {e}")
+        log.error(f"Cloudflare upload failed: {e}")
         return None
 
     cf_data = cf_response.json()
     if not cf_data.get("success"):
-        errors = cf_data.get("errors", [])
-        log.error(f"Cloudflare Images error: {errors}")
+        log.error(f"Cloudflare error: {cf_data.get('errors')}")
         return None
 
     variants = cf_data.get("result", {}).get("variants", [])
     if variants:
-        url = variants[0]
-        log.info(f"Cloudflare image URL: {url}")
-        return url
+        log.info(f"Cloudflare URL: {variants[0]}")
+        return variants[0]
 
     image_id = cf_data.get("result", {}).get("id")
     if image_id:
         url = f"{CF_DELIVERY_BASE}/{image_id}/public"
-        log.info(f"Cloudflare image URL (constructed): {url}")
+        log.info(f"Cloudflare URL (constructed): {url}")
         return url
 
     log.error("Cloudflare upload succeeded but no URL returned")
@@ -657,16 +735,12 @@ def upload_image(image_url: str, slug: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url: str) -> str | None:
-    """
-    Write listing to Webflow CMS. Returns the new item ID or None on failure.
-    """
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
     price      = parse_price(listing.get("listPrice", 0))
     city       = addr.get("city", "")
     state_full = addr.get("state", "")
-    state_abbr = state_abbrev(state_full)
     address    = build_address(addr)
     slug       = make_slug(city, price)
     beds       = parse_int(details.get("numBedrooms"))
@@ -674,13 +748,11 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
     sqft       = parse_sqft(details.get("sqft"))
     year       = parse_int(details.get("yearBuilt"))
 
+    headline      = content.get("HEADLINE", "")
+    name          = headline if headline else f"{city}, {state_full} — ${make_price_display(price)}"
     listing_url   = f"https://housesunder150k.com/listings/{slug}"
     affiliate_url = make_realtor_url(addr)
-
-    headline = content.get("HEADLINE", "")
-    name = headline if headline else f"{city}, {state_full} — ${make_price_display(price)}"
-
-    is_hero = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
+    is_hero       = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
 
     field_data = {
         "name":             name,
@@ -690,7 +762,7 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "location-display": f"{city}, {state_full}",
         "address":          address,
         "city":             city,
-        "state":            state_abbr,
+        "state":            state_abbrev(state_full),
         "year-built":       year,
         "bedrooms":         beds,
         "bathrooms":        baths,
@@ -726,20 +798,17 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
             log.error(f"Webflow response: {e.response.text[:500]}")
         return None
 
-    item = r.json()
-    item_id = item.get("id")
+    item_id = r.json().get("id")
     log.info(f"Webflow item created: {item_id}")
     return item_id
 
 
 def publish_webflow(item_id: str) -> bool:
-    """Publish a Webflow CMS item by ID. Returns True on success."""
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
         "Content-Type": "application/json",
         "accept": "application/json",
     }
-
     log.info(f"Publishing Webflow item: {item_id}")
     try:
         r = requests.post(
@@ -752,7 +821,6 @@ def publish_webflow(item_id: str) -> bool:
     except requests.RequestException as e:
         log.error(f"Webflow publish failed: {e}")
         return False
-
     log.info(f"Published item {item_id}")
     return True
 
@@ -761,70 +829,94 @@ def publish_webflow(item_id: str) -> bool:
 # Per-listing pipeline
 # ---------------------------------------------------------------------------
 
-def process_listing(listing: dict) -> str:
+def process_listing(listing: dict, today_ct: date, published_today: int) -> tuple[str, float]:
     """
     Run the full pipeline for a single listing.
-    Returns: 'published' | 'skipped_score' | 'skipped_dedup' | 'error'
+    Returns: ('published' | 'skipped_score' | 'skipped_dedup' | 'skipped_seen' | 'error', cost)
     """
     addr    = listing.get("address", {})
     price   = parse_price(listing.get("listPrice", 0))
     city    = addr.get("city", "unknown")
     mls_num = listing.get("mlsNumber", "unknown")
     slug    = make_slug(city, price)
+    total_cost = 0.0
 
     log.info(f"--- Processing: {city} ${make_price_display(price)} (MLS {mls_num}) ---")
 
-    if slug_exists(slug):
-        log.info(f"Skipping {slug} — already published")
-        return "skipped_dedup"
+    # 1. Dedup — already published
+    if db_slug_published(slug):
+        log.info(f"Skipping {slug} — already published (Supabase)")
+        return "skipped_dedup", 0.0
 
-    score_data = score_listing(listing)
+    # 2. Seen suppression — scored and discarded within suppression window
+    seen = db_mls_seen_recently(mls_num)
+    if seen:
+        log.info(
+            f"Skipping MLS {mls_num} — seen {seen['times_seen']}x, "
+            f"last score={seen['score']} ({seen['tier']}) within {SEEN_SUPPRESSION_DAYS} days"
+        )
+        # Update last_seen_at and increment counter
+        db_upsert_seen(mls_num, slug, seen["score"], seen["tier"])
+        return "skipped_seen", 0.0
+
+    # 3. Score
+    score_data, score_cost = score_listing(listing)
+    total_cost += score_cost
     if not score_data:
         log.error(f"Scoring failed for {slug}")
-        return "error"
+        return "error", total_cost
 
     score = score_data.get("SCORE", 0)
+    tier  = score_data.get("TIER", "SKIP")
+
+    # Always upsert to seen_listings after scoring
+    db_upsert_seen(mls_num, slug, score, tier)
+
     if score <= 5:
         log.info(f"Score {score} <= 5 — discarding {slug}")
-        return "skipped_score"
+        return "skipped_score", total_cost
 
-    content = generate_content(listing, score_data)
+    # 4. Generate content
+    content, content_cost = generate_content(listing, score_data)
+    total_cost += content_cost
     if not content:
         log.error(f"Content generation failed for {slug}")
-        return "error"
+        return "error", total_cost
 
+    # 5. Upload image
     images = listing.get("images", [])
-    hero_image_url = None
+    hero_image_url = ""
     if images:
-        hero_image_url = upload_image(images[0], slug)
+        hero_image_url = upload_image(images[0], slug) or ""
     if not hero_image_url:
         log.warning(f"No hero image for {slug} — proceeding without image")
-        hero_image_url = ""
 
+    # 6. Write to Webflow
     item_id = write_webflow(listing, score_data, content, hero_image_url)
     if not item_id:
         log.error(f"Webflow write failed for {slug}")
-        return "error"
+        return "error", total_cost
 
+    # 7. Publish
     if not publish_webflow(item_id):
         log.error(f"Webflow publish failed for item {item_id}")
-        return "error"
+        return "error", total_cost
 
-    write_post_record(slug, {
-        "slug": slug,
-        "mls_number": mls_num,
-        "webflow_item_id": item_id,
-        "score": score,
-        "tier": score_data.get("TIER"),
-        "category": score_data.get("CATEGORY"),
-        "deal_of_day_candidate": score_data.get("DEAL_OF_DAY_CANDIDATE"),
-        "headline": content.get("HEADLINE"),
-        "hero_image_url": hero_image_url,
-        "published_at": datetime.now(timezone.utc).isoformat(),
-    })
+    # 8. Record in Supabase published_listings
+    db_insert_published(
+        slug=slug,
+        mls_number=mls_num,
+        webflow_item_id=item_id,
+        score=score,
+        tier=tier,
+        category=score_data.get("CATEGORY", ""),
+        headline=content.get("HEADLINE", ""),
+        hero_image_url=hero_image_url,
+        today_ct=today_ct,
+    )
 
-    log.info(f"Published: {slug} (score={score}, tier={score_data.get('TIER')})")
-    return "published"
+    log.info(f"Published: {slug} (score={score}, tier={tier})")
+    return "published", total_cost
 
 
 # ---------------------------------------------------------------------------
@@ -834,18 +926,57 @@ def process_listing(listing: dict) -> str:
 def run_pipeline():
     log.info("=== HousesUnder150K Ingestion Pipeline Start ===")
     start = time.time()
+    today_ct = get_today_ct()
 
+    # Record run start
+    run_id = db_insert_run({"started_at": datetime.now(timezone.utc).isoformat()})
+
+    # FIRST: check daily limit before any API calls
+    count_today = db_count_published_today(today_ct)
+    log.info(f"Published today (CT): {count_today}/{DAILY_PUBLISH_LIMIT}")
+
+    if count_today >= DAILY_PUBLISH_LIMIT:
+        log.info(f"Daily limit reached — exiting without processing")
+        if run_id:
+            db_update_run(run_id, {
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "daily_limit_hit": True,
+                "notes": f"Exited: daily limit {count_today}/{DAILY_PUBLISH_LIMIT} already reached",
+            })
+        return
+
+    # Fetch listings
     listings = fetch_listings()
     if not listings:
         log.info("No listings returned — exiting")
+        if run_id:
+            db_update_run(run_id, {
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "listings_fetched": 0,
+            })
         return
 
-    stats = {"published": 0, "skipped_score": 0, "skipped_dedup": 0, "error": 0}
+    stats = {
+        "published": 0, "skipped_score": 0, "skipped_dedup": 0,
+        "skipped_seen": 0, "error": 0,
+    }
+    total_tokens_scoring = 0
+    total_tokens_content = 0
+    total_cost = 0.0
+    published_this_run = 0
 
     for listing in listings:
+        # Check if we've hit the daily limit mid-batch
+        if count_today + published_this_run >= DAILY_PUBLISH_LIMIT:
+            log.info(f"Daily limit reached mid-batch — stopping")
+            break
+
         try:
-            result = process_listing(listing)
+            result, cost = process_listing(listing, today_ct, count_today + published_this_run)
             stats[result] = stats.get(result, 0) + 1
+            total_cost += cost
+            if result == "published":
+                published_this_run += 1
         except Exception as e:
             log.error(f"Unhandled error processing listing: {e}", exc_info=True)
             stats["error"] += 1
@@ -856,8 +987,21 @@ def run_pipeline():
     log.info(
         f"=== Pipeline complete in {elapsed:.1f}s | "
         f"published={stats['published']} skipped_score={stats['skipped_score']} "
-        f"skipped_dedup={stats['skipped_dedup']} errors={stats['error']} ==="
+        f"skipped_seen={stats['skipped_seen']} skipped_dedup={stats['skipped_dedup']} "
+        f"errors={stats['error']} est_cost=${total_cost:.5f} ==="
     )
+
+    if run_id:
+        db_update_run(run_id, {
+            "completed_at": datetime.now(timezone.utc).isoformat(),
+            "listings_fetched": len(listings),
+            "listings_scored": stats["skipped_score"] + stats["published"],
+            "listings_skipped": stats["skipped_seen"] + stats["skipped_dedup"],
+            "published": stats["published"],
+            "errors": stats["error"],
+            "est_cost_usd": round(total_cost, 5),
+            "daily_limit_hit": (count_today + published_this_run) >= DAILY_PUBLISH_LIMIT,
+        })
 
 
 if __name__ == "__main__":
