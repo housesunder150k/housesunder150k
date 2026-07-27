@@ -51,7 +51,7 @@ CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDF
 CF_DELIVERY_BASE       = "https://imagedelivery.net/VbqNe4WDJ-oPFPFAkDRv_w"
 WEBFLOW_BASE           = "https://api.webflow.com/v2"
 
-SEEN_SUPPRESSION_DAYS  = 7
+SEEN_SUPPRESSION_DAYS  = 14
 CT_TZ                  = pytz.timezone("America/Chicago")
 
 # States to rotate through — shuffled each run for geographic diversity
@@ -61,6 +61,9 @@ US_STATES = [
     "Nebraska", "North Carolina", "Ohio", "Oklahoma", "Pennsylvania",
     "South Carolina", "Tennessee", "Texas", "Virginia", "West Virginia", "Wisconsin",
 ]
+
+# Sort orders rotated across runs for maximum listing pool diversity
+REALTYAPI_SORT_ORDERS = ["Newest", "Relevant", "Price_Low", "Price_High"]
 
 # Webflow CMS
 WF_STATUS_ACTIVE = "3b41185e9af84f92d8da092965308a2d"
@@ -430,14 +433,14 @@ def _ra_headers() -> dict:
 REALTYAPI_REALTOR_BASE = "https://realtor.realtyapi.io"
 
 
-def fetch_search_results(state_name: str, result_count: int = 50) -> list[dict]:
+def fetch_search_results(state_name: str, result_count: int = 50, sort_order: str = "Newest") -> list[dict]:
     """Fetch active for-sale listings under $150K in a given state via Realtor.com."""
     params = {
         "location": state_name,
         "priceRange": "max:150000",
         "searchType": "For_Sale",
         "propertyType": "House,Townhome",
-        "sortOrder": "Newest",
+        "sortOrder": sort_order,
         "hasPhotos": True,
         "seniorCommunity": False,
         "resultCount": result_count,
@@ -597,11 +600,15 @@ def fetch_listings() -> list[dict]:
     states = US_STATES.copy()
     random.shuffle(states)
 
+    # Pick a random sort order for this entire run — different runs hit different listing pools
+    sort_order = random.choice(REALTYAPI_SORT_ORDERS)
+    log.info(f"Sort order this run: {sort_order}")
+
     for state in states:
         if len(collected) >= target:
             break
 
-        results = fetch_search_results(state, result_count=50)
+        results = fetch_search_results(state, result_count=50, sort_order=sort_order)
         if not results:
             continue
 
