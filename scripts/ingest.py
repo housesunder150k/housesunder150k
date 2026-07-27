@@ -42,8 +42,9 @@ SUPABASE_URL           = os.environ["SUPABASE_URL"]
 SUPABASE_KEY           = os.environ["SUPABASE_KEY"]
 DAILY_PUBLISH_LIMIT    = int(os.environ.get("DAILY_PUBLISH_LIMIT", "10"))
 
-CLAUDE_MODEL           = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS      = 1000
+CLAUDE_MODEL                = "claude-sonnet-4-6"
+CLAUDE_MAX_TOKENS_SCORING   = 250  # scoring output is ~150-200 tokens
+CLAUDE_MAX_TOKENS_CONTENT   = 600  # content gen outputs 400-500 tokens
 REALTYAPI_BASE         = "https://redfin.realtyapi.io"
 ANTHROPIC_BASE         = "https://api.anthropic.com/v1/messages"
 CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/images/v1"
@@ -655,7 +656,7 @@ def fetch_listings() -> list[dict]:
 # Claude API
 # ---------------------------------------------------------------------------
 
-def call_claude(system: str, user: str, call_name: str) -> tuple[str | None, float]:
+def call_claude(system: str, user: str, call_name: str, max_tokens: int = CLAUDE_MAX_TOKENS_SCORING) -> tuple[str | None, float]:
     headers = {
         "x-api-key": ANTHROPIC_API_KEY,
         "anthropic-version": "2023-06-01",
@@ -664,7 +665,7 @@ def call_claude(system: str, user: str, call_name: str) -> tuple[str | None, flo
     }
     body = {
         "model": CLAUDE_MODEL,
-        "max_tokens": CLAUDE_MAX_TOKENS,
+        "max_tokens": max_tokens,
         "system": [
             {
                 "type": "text",
@@ -743,6 +744,56 @@ def parse_scoring_output(text: str) -> dict:
     return result
 
 
+def prefilter_listing(listing: dict) -> bool:
+    """
+    Quick pre-filter before calling Claude. Returns False if listing should be auto-skipped.
+    Catches obvious rejects without spending an API call.
+    """
+    details = listing.get("details", {})
+    description = details.get("description", "") or ""
+    desc_lower = description.lower()
+    beds = parse_int(details.get("numBedrooms"))
+    sqft = parse_int(details.get("sqft"))
+    lot_acres = details.get("lotAcres")
+    year_built = parse_int(details.get("yearBuilt"))
+    waterfront = details.get("waterfront", False)
+    pool = details.get("pool", False)
+
+    # Floor qualifiers — always score regardless of description
+    has_floor = (
+        waterfront
+        or pool
+        or (lot_acres and lot_acres >= 0.5 and not (beds <= 2 and sqft < 900))
+        or year_built > 0 and year_built <= 1950
+        or any(w in desc_lower for w in ["waterfront", "lakefront", "riverfront", "lake view", "mountain view", "wooded"])
+    )
+    if has_floor:
+        return True
+
+    # Auto-skip: no description and no floor qualifier
+    if len(description.strip()) < 30:
+        log.info(f"[PREFILTER] Skipping — no description, no floor qualifier")
+        return False
+
+    # Auto-skip: pure investor/flipper language with no redeeming signals
+    flipper_signals = ["bring your vision", "investor special", "blank canvas", "as-is", "cash only", "cash-only"]
+    character_signals = ["hardwood", "original", "fireplace", "porch", "beams", "stained glass", "victorian",
+                         "craftsman", "bungalow", "farmhouse", "barn", "garage", "basement", "renovated",
+                         "updated", "new roof", "new hvac", "new windows", "pool", "acre", "lake", "creek"]
+    flipper_count = sum(1 for s in flipper_signals if s in desc_lower)
+    character_count = sum(1 for s in character_signals if s in desc_lower)
+    if flipper_count >= 2 and character_count == 0:
+        log.info(f"[PREFILTER] Skipping — investor language, no character signals")
+        return False
+
+    # Auto-skip: manufactured/mobile home
+    if any(w in desc_lower for w in ["manufactured", "mobile home", "modular", "double wide", "doublewide", "single wide"]):
+        log.info(f"[PREFILTER] Skipping — manufactured/mobile home")
+        return False
+
+    return True
+
+
 def score_listing(listing: dict) -> tuple[dict | None, float]:
     raw, cost = call_claude(SCORING_PROMPT, build_scoring_input(listing), "scoring")
     if not raw:
@@ -778,7 +829,7 @@ def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, floa
         key_hooks=score_data.get("KEY_HOOKS", ""),
         description=details.get("description", "") or "(no description)",
     )
-    raw, cost = call_claude("You are a real estate content writer.", prompt, "content_gen")
+    raw, cost = call_claude("You are a real estate content writer.", prompt, "content_gen", max_tokens=CLAUDE_MAX_TOKENS_CONTENT)
     if not raw:
         return None, cost
     return parse_content_output(raw), cost
@@ -1005,6 +1056,11 @@ def process_listing(listing: dict, today_ct: date) -> tuple[str, float]:
         log.info(f"Skipping MLS {mls_num} — seen {seen['times_seen']}x, score={seen['score']} within {SEEN_SUPPRESSION_DAYS}d")
         db_upsert_seen(mls_num, slug, seen["score"], seen["tier"])
         return "skipped_seen", 0.0
+
+    # Pre-filter obvious rejects before spending a Claude API call
+    if not prefilter_listing(listing):
+        db_upsert_seen(mls_num, slug, 2, "SKIP")  # mark as seen so we don't retry
+        return "skipped_score", 0.0
 
     score_data, score_cost = score_listing(listing)
     total_cost += score_cost
