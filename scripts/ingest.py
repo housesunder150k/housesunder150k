@@ -120,6 +120,23 @@ STATE_FULL_NAME = {
     "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
 }
 
+# State abbreviation -> states page slug (matches /states/[slug] pages)
+STATE_TO_SLUG = {
+    "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",
+    "CA": "california", "CO": "colorado", "CT": "connecticut", "DE": "delaware",
+    "FL": "florida", "GA": "georgia", "HI": "hawaii", "ID": "idaho",
+    "IL": "illinois", "IN": "indiana", "IA": "iowa", "KS": "kansas",
+    "KY": "kentucky", "LA": "louisiana", "ME": "maine", "MD": "maryland",
+    "MA": "massachusetts", "MI": "michigan", "MN": "minnesota", "MS": "mississippi",
+    "MO": "missouri", "MT": "montana", "NE": "nebraska", "NV": "nevada",
+    "NH": "new-hampshire", "NJ": "new-jersey", "NM": "new-mexico", "NY": "new-york",
+    "NC": "north-carolina", "ND": "north-dakota", "OH": "ohio", "OK": "oklahoma",
+    "OR": "oregon", "PA": "pennsylvania", "RI": "rhode-island", "SC": "south-carolina",
+    "SD": "south-dakota", "TN": "tennessee", "TX": "texas", "UT": "utah",
+    "VT": "vermont", "VA": "virginia", "WA": "washington", "WV": "west-virginia",
+    "WI": "wisconsin", "WY": "wyoming",
+}
+
 # ---------------------------------------------------------------------------
 # Prompts
 # ---------------------------------------------------------------------------
@@ -1023,10 +1040,11 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "bedrooms":         beds,
         "bathrooms":        baths,
         "square-feet":      sqft,
-        "hero-image":       {"url": hero_image_url},
+        "hero-image":       {"url": hero_image_url, "alt": name},
         "narrative-body":   format_richtext(content.get("NARRATIVE", "")),
         "short-summary":    content.get("SHORT_SUMMARY", ""),
         "listing-url":      f"https://housesunder150k.com/listings/{slug}",
+        "state-page-url":   f"https://housesunder150k.com/states/{STATE_TO_SLUG.get(state_abbr, '')}" if state_abbr in STATE_TO_SLUG else None,
         "affiliate-url":    listing.get("listingHref") or make_realtor_url(address, city, state_abbr, zip_code),
         "social-caption":   content.get("SOCIAL_CAPTION", ""),
         "status":           WF_STATUS_ACTIVE,
