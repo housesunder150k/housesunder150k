@@ -68,6 +68,37 @@ REALTYAPI_SORT_ORDERS = ["Newest", "Relevant", "Price_Low", "Price_High"]
 # Webflow CMS
 WF_STATUS_ACTIVE = "3b41185e9af84f92d8da092965308a2d"
 
+# State abbreviation -> States collection item ID (Reference field target)
+# States collection ID: 6a67c480dba86ce339bab621
+# Added Session 7 for /states/[state] pages. Backfilled 30 existing listings separately.
+STATE_TO_WEBFLOW_ITEM_ID = {
+    "AL": "6a67c49e081d8375c4744785", "AK": "6a67c49e081d8375c4744787",
+    "AZ": "6a67c49e081d8375c4744789", "AR": "6a67c49e081d8375c474478b",
+    "CA": "6a67c49e081d8375c474478d", "CO": "6a67c49e081d8375c474478f",
+    "CT": "6a67c49e081d8375c4744791", "DE": "6a67c49e081d8375c4744793",
+    "FL": "6a67c49e081d8375c4744795", "GA": "6a67c49e081d8375c4744797",
+    "HI": "6a67c49e081d8375c4744799", "ID": "6a67c49e081d8375c474479b",
+    "IL": "6a67c49e081d8375c474479d", "IN": "6a67c49e081d8375c474479f",
+    "IA": "6a67c49e081d8375c47447a1", "KS": "6a67c49e081d8375c47447a3",
+    "KY": "6a67c49e081d8375c47447a5", "LA": "6a67c49e081d8375c47447a7",
+    "ME": "6a67c49e081d8375c47447a9", "MD": "6a67c49e081d8375c47447ab",
+    "MA": "6a67c49e081d8375c47447ad", "MI": "6a67c49e081d8375c47447af",
+    "MN": "6a67c49e081d8375c47447b1", "MS": "6a67c49e081d8375c47447b3",
+    "MO": "6a67c49e081d8375c47447b5", "MT": "6a67c49e081d8375c47447b7",
+    "NE": "6a67c49e081d8375c47447b9", "NV": "6a67c49e081d8375c47447bb",
+    "NH": "6a67c49e081d8375c47447bd", "NJ": "6a67c49e081d8375c47447bf",
+    "NM": "6a67c49e081d8375c47447c1", "NY": "6a67c49e081d8375c47447c3",
+    "NC": "6a67c49e081d8375c47447c5", "ND": "6a67c49e081d8375c47447c7",
+    "OH": "6a67c49e081d8375c47447c9", "OK": "6a67c49e081d8375c47447cb",
+    "OR": "6a67c49e081d8375c47447cd", "PA": "6a67c49e081d8375c47447cf",
+    "RI": "6a67c49e081d8375c47447d1", "SC": "6a67c49e081d8375c47447d3",
+    "SD": "6a67c49e081d8375c47447d5", "TN": "6a67c49e081d8375c47447d7",
+    "TX": "6a67c49e081d8375c47447d9", "UT": "6a67c49e081d8375c47447db",
+    "VT": "6a67c49e081d8375c47447dd", "VA": "6a67c49e081d8375c47447df",
+    "WA": "6a67c49e081d8375c47447e1", "WV": "6a67c49e081d8375c47447e3",
+    "WI": "6a67c49e081d8375c47447e5", "WY": "6a67c49e081d8375c47447e7",
+}
+
 # Claude pricing (Sonnet 4.6)
 COST_PER_1K_INPUT  = 0.003
 COST_PER_1K_OUTPUT = 0.015
@@ -370,7 +401,7 @@ def db_upsert_seen(mls_number: str, slug: str, score: int, tier: str) -> None:
 def db_insert_published(
     slug: str, mls_number: str, webflow_item_id: str,
     score: int, tier: str, category: str, headline: str,
-    hero_image_url: str, today_ct: date
+    hero_image_url: str, today_ct: date, is_deal_of_day: bool = False
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
@@ -379,12 +410,47 @@ def db_insert_published(
         "hero_image_url": hero_image_url,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "published_date_ct": today_ct.isoformat(),
+        "is_deal_of_day": is_deal_of_day,
     }
     try:
         r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
         r.raise_for_status()
     except Exception as e:
         log.error(f"Supabase insert_published error: {e}")
+
+
+def db_deal_of_day_chosen_today(today_ct: date) -> bool:
+    """True if a deal-of-the-day has already been chosen for this CT calendar day.
+    Naturally resets at CT midnight since it's scoped to today's date, same as
+    the daily publish limit counter."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    params = {
+        "select": "slug",
+        "published_date_ct": f"eq.{today_ct.isoformat()}",
+        "is_deal_of_day": "eq.true",
+        "limit": 1,
+    }
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        return len(r.json()) > 0
+    except Exception as e:
+        log.error(f"Supabase deal_of_day_chosen_today error: {e}")
+        return False
+
+
+def db_get_active_deal_of_day() -> dict | None:
+    """Return the currently active deal-of-the-day row (any date), if any."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    params = {"select": "slug,webflow_item_id", "is_deal_of_day": "eq.true", "limit": 1}
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        return rows[0] if rows else None
+    except Exception as e:
+        log.error(f"Supabase get_active_deal_of_day error: {e}")
+        return None
 
 
 def db_insert_run(run_data: dict) -> int | None:
@@ -924,7 +990,7 @@ def upload_image(image_url: str, slug: str) -> str | None:
 # Webflow CMS
 # ---------------------------------------------------------------------------
 
-def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url: str) -> str | None:
+def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url: str, is_hero: bool) -> str | None:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
@@ -942,7 +1008,6 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
 
     headline    = content.get("HEADLINE", "")
     name        = headline if headline else f"{city}, {state_full} — ${make_price_display(price)}"
-    is_hero     = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
 
     field_data = {
         "name":             name,
@@ -953,6 +1018,7 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "address":          address,
         "city":             city,
         "state":            state_abbr,
+        "us-state":         STATE_TO_WEBFLOW_ITEM_ID.get(state_abbr),
         "year-built":       year,
         "bedrooms":         beds,
         "bathrooms":        baths,
@@ -1014,6 +1080,30 @@ def publish_webflow(item_id: str) -> bool:
     return True
 
 
+def unset_deal_of_the_day(item_id: str) -> bool:
+    """Clear deal-of-the-day on a previously-featured item and publish the change.
+    Called right before a new deal-of-the-day is written, so only one item is
+    ever flagged true at a time."""
+    headers = {
+        "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
+        "Content-Type": "application/json",
+        "accept": "application/json",
+    }
+    try:
+        r = requests.patch(
+            f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items/{item_id}",
+            headers=headers,
+            json={"fieldData": {"deal-of-the-day": False}},
+            timeout=30,
+        )
+        r.raise_for_status()
+    except requests.RequestException as e:
+        log.error(f"Failed to clear previous deal-of-the-day ({item_id}): {e}")
+        return False
+    log.info(f"Cleared previous deal-of-the-day: {item_id}")
+    return publish_webflow(item_id)
+
+
 WEBFLOW_SITE_ID       = "6a650a7eb2639262c4b6adb7"
 WEBFLOW_DOMAIN_IDS    = ["6a661987994ab168be06566b", "6a661986994ab168be065664"]
 
@@ -1044,7 +1134,7 @@ def publish_site() -> bool:
 # Per-listing pipeline
 # ---------------------------------------------------------------------------
 
-def process_listing(listing: dict, today_ct: date) -> tuple[str, float]:
+def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple[str, float, bool]:
     addr    = listing.get("address", {})
     price   = parse_int(listing.get("listPrice", 0))
     city    = addr.get("city", "unknown")
@@ -1056,23 +1146,23 @@ def process_listing(listing: dict, today_ct: date) -> tuple[str, float]:
 
     if db_slug_published(slug):
         log.info(f"Skipping {slug} — already published")
-        return "skipped_dedup", 0.0
+        return "skipped_dedup", 0.0, False
 
     seen = db_mls_seen_recently(mls_num)
     if seen:
         log.info(f"Skipping MLS {mls_num} — seen {seen['times_seen']}x, score={seen['score']} within {SEEN_SUPPRESSION_DAYS}d")
         db_upsert_seen(mls_num, slug, seen["score"], seen["tier"])
-        return "skipped_seen", 0.0
+        return "skipped_seen", 0.0, False
 
     # Pre-filter obvious rejects before spending a Claude API call
     if not prefilter_listing(listing):
         db_upsert_seen(mls_num, slug, 2, "SKIP")  # mark as seen so we don't retry
-        return "skipped_score", 0.0
+        return "skipped_score", 0.0, False
 
     score_data, score_cost = score_listing(listing)
     total_cost += score_cost
     if not score_data:
-        return "error", total_cost
+        return "error", total_cost, False
 
     score = score_data.get("SCORE", 0)
     tier  = score_data.get("TIER", "SKIP")
@@ -1080,37 +1170,50 @@ def process_listing(listing: dict, today_ct: date) -> tuple[str, float]:
 
     if score <= 5:
         log.info(f"Score {score} <= 5 — discarding {slug}")
-        return "skipped_score", total_cost
+        return "skipped_score", total_cost, False
 
     content, content_cost = generate_content(listing, score_data)
     total_cost += content_cost
     if not content:
-        return "error", total_cost
+        return "error", total_cost, False
     if not content.get("HEADLINE") or not content.get("NARRATIVE"):
         log.error(f"Content generation returned empty fields for {slug} — skipping Webflow write")
-        return "error", total_cost
+        return "error", total_cost, False
 
     images = listing.get("images", [])
     hero_image_url = upload_image(images[0], slug) if images else ""
     if not hero_image_url:
         log.warning(f"No hero image for {slug}")
 
-    item_id = write_webflow(listing, score_data, content, hero_image_url)
+    # Deal-of-the-day: only one per CT day. Claude's candidate flag only wins
+    # if the slot hasn't already been claimed by an earlier listing this run
+    # or an earlier run today.
+    claude_wants_hero = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
+    is_hero = claude_wants_hero and dod_available
+    if claude_wants_hero and not dod_available:
+        log.info(f"{slug} qualifies for deal-of-the-day but the slot is already taken today — skipping flag")
+
+    if is_hero:
+        prior = db_get_active_deal_of_day()
+        if prior and prior.get("webflow_item_id"):
+            unset_deal_of_the_day(prior["webflow_item_id"])
+
+    item_id = write_webflow(listing, score_data, content, hero_image_url, is_hero)
     if not item_id:
-        return "error", total_cost
+        return "error", total_cost, False
 
     if not publish_webflow(item_id):
-        return "error", total_cost
+        return "error", total_cost, False
 
     db_insert_published(
         slug=slug, mls_number=mls_num, webflow_item_id=item_id,
         score=score, tier=tier, category=score_data.get("CATEGORY", ""),
         headline=content.get("HEADLINE", ""), hero_image_url=hero_image_url,
-        today_ct=today_ct,
+        today_ct=today_ct, is_deal_of_day=is_hero,
     )
 
-    log.info(f"Published: {slug} (score={score}, tier={tier})")
-    return "published", total_cost
+    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero})")
+    return "published", total_cost, is_hero
 
 
 # ---------------------------------------------------------------------------
@@ -1147,6 +1250,8 @@ def run_pipeline():
     stats = {"published": 0, "skipped_score": 0, "skipped_dedup": 0, "skipped_seen": 0, "error": 0}
     total_cost = 0.0
     published_this_run = 0
+    dod_available = not db_deal_of_day_chosen_today(today_ct)
+    log.info(f"Deal-of-the-day available today: {dod_available}")
 
     for listing in listings:
         if count_today + published_this_run >= DAILY_PUBLISH_LIMIT:
@@ -1154,11 +1259,13 @@ def run_pipeline():
             break
 
         try:
-            result, cost = process_listing(listing, today_ct)
+            result, cost, dod_used = process_listing(listing, today_ct, dod_available)
             stats[result] = stats.get(result, 0) + 1
             total_cost += cost
             if result == "published":
                 published_this_run += 1
+            if dod_used:
+                dod_available = False
         except Exception as e:
             log.error(f"Unhandled error: {e}", exc_info=True)
             stats["error"] += 1
