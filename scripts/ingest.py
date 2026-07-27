@@ -325,6 +325,26 @@ def db_mls_seen_recently(mls_number: str) -> dict | None:
         return None
 
 
+def db_batch_seen_recently(property_ids: list[str]) -> set[str]:
+    """Return set of property_ids seen within suppression window."""
+    if not property_ids:
+        return set()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
+    url = f"{SUPABASE_URL}/rest/v1/seen_listings"
+    params = {
+        "select": "mls_number",
+        "mls_number": f"in.({','.join(property_ids)})",
+        "last_seen_at": f"gte.{cutoff}",
+    }
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        return {row["mls_number"] for row in r.json()}
+    except Exception as e:
+        log.error(f"Supabase batch_seen error: {e}")
+        return set()
+
+
 def db_upsert_seen(mls_number: str, slug: str, score: int, tier: str) -> None:
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
     headers = _sb_headers()
@@ -584,16 +604,24 @@ def fetch_listings() -> list[dict]:
         if not results:
             continue
 
-        state_published = False
+        # Shuffle within state to avoid hitting the same top listings every run
+        random.shuffle(results)
+
+        # Batch check which property_ids have been seen recently — one query per state
+        all_prop_ids = [r.get("property_id", "") for r in results if r.get("property_id")]
+        seen_prop_ids = db_batch_seen_recently(all_prop_ids)
+        log.info(f"[{state}] {len(seen_prop_ids)}/{len(all_prop_ids)} already seen")
 
         for result in results:
             if len(collected) >= target:
                 break
-            if state_published:
-                break
 
             prop_id = result.get("property_id", "") or result.get("propertyId", "")
             if not prop_id or prop_id in seen_ids:
+                continue
+
+            # Skip listings already seen within suppression window
+            if prop_id in seen_prop_ids:
                 continue
 
             # Fetch full details for description and year built
@@ -609,7 +637,7 @@ def fetch_listings() -> list[dict]:
 
             # Enrich with year_built from detail call
             listing["details"]["yearBuilt"] = year_built
-            listing["_state"] = state  # track for diversity flag
+            listing["_state"] = state
 
             # Skip if price is 0 or missing
             if listing["listPrice"] <= 0:
@@ -617,7 +645,7 @@ def fetch_listings() -> list[dict]:
 
             seen_ids.add(prop_id)
             collected.append(listing)
-            state_published = True  # move to next state after first candidate
+            break  # 1 per state, move on
 
     log.info(f"Fetched {len(collected)} total listings")
     return collected
