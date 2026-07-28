@@ -1,9 +1,14 @@
 """
 HousesUnder150K.com — Ingestion Pipeline
-Runs on Railway 3x/day: 8am, 1pm, 6pm CT
-Fetches listings from RealtyAPI (Redfin), scores, generates content, publishes to Webflow.
+Runs on Railway 6x/day: 8am, 1pm, 6pm, 8pm, midnight, 4am CT
+Fetches listings from RealtyAPI (Realtor.com), scores, generates content, publishes to Webflow.
 Dedup, daily limit, and seen-listing suppression via Supabase.
-Data source: RealtyAPI (realtyapi.io) — Redfin endpoint
+Data source: RealtyAPI (realtyapi.io) — Realtor.com endpoint
+
+Changes (2026-07-28):
+- pending=False added to search params — filters pending listings at source
+- Gallery photos: uploads photos[1-3] to Cloudflare, writes to gallery-images MultiImage field
+- gallery_image_ids stored in Supabase for maintenance job cleanup on status change
 """
 
 import os
@@ -43,9 +48,9 @@ SUPABASE_KEY           = os.environ["SUPABASE_KEY"]
 DAILY_PUBLISH_LIMIT    = int(os.environ.get("DAILY_PUBLISH_LIMIT", "10"))
 
 CLAUDE_MODEL                = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS_SCORING   = 250  # scoring output is ~150-200 tokens
-CLAUDE_MAX_TOKENS_CONTENT   = 600  # content gen outputs 400-500 tokens
-REALTYAPI_BASE         = "https://redfin.realtyapi.io"
+CLAUDE_MAX_TOKENS_SCORING   = 250
+CLAUDE_MAX_TOKENS_CONTENT   = 600
+REALTYAPI_REALTOR_BASE = "https://realtor.realtyapi.io"
 ANTHROPIC_BASE         = "https://api.anthropic.com/v1/messages"
 CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/images/v1"
 CF_DELIVERY_BASE       = "https://imagedelivery.net/VbqNe4WDJ-oPFPFAkDRv_w"
@@ -53,6 +58,7 @@ WEBFLOW_BASE           = "https://api.webflow.com/v2"
 
 SEEN_SUPPRESSION_DAYS  = 14
 CT_TZ                  = pytz.timezone("America/Chicago")
+GALLERY_PHOTO_COUNT    = 3  # number of additional gallery photos (indices 1-3 of photos[])
 
 # States to rotate through — shuffled each run for geographic diversity
 US_STATES = [
@@ -62,15 +68,10 @@ US_STATES = [
     "South Carolina", "Tennessee", "Texas", "Virginia", "West Virginia", "Wisconsin",
 ]
 
-# Sort orders rotated across runs for maximum listing pool diversity
 REALTYAPI_SORT_ORDERS = ["Newest", "Relevant", "Price_Low", "Price_High"]
 
-# Webflow CMS
 WF_STATUS_ACTIVE = "3b41185e9af84f92d8da092965308a2d"
 
-# State abbreviation -> States collection item ID (Reference field target)
-# States collection ID: 6a67c480dba86ce339bab621
-# Added Session 7 for /states/[state] pages. Backfilled 30 existing listings separately.
 STATE_TO_WEBFLOW_ITEM_ID = {
     "AL": "6a67c49e081d8375c4744785", "AK": "6a67c49e081d8375c4744787",
     "AZ": "6a67c49e081d8375c4744789", "AR": "6a67c49e081d8375c474478b",
@@ -99,11 +100,9 @@ STATE_TO_WEBFLOW_ITEM_ID = {
     "WI": "6a67c49e081d8375c47447e5", "WY": "6a67c49e081d8375c47447e7",
 }
 
-# Claude pricing (Sonnet 4.6)
 COST_PER_1K_INPUT  = 0.003
 COST_PER_1K_OUTPUT = 0.015
 
-# State abbreviation -> full name (Redfin returns 2-letter abbreviation)
 STATE_FULL_NAME = {
     "AL": "Alabama", "AK": "Alaska", "AZ": "Arizona", "AR": "Arkansas",
     "CA": "California", "CO": "Colorado", "CT": "Connecticut", "DE": "Delaware",
@@ -120,7 +119,6 @@ STATE_FULL_NAME = {
     "WI": "Wisconsin", "WY": "Wyoming", "DC": "District of Columbia",
 }
 
-# State abbreviation -> states page slug (matches /states/[slug] pages)
 STATE_TO_SLUG = {
     "AL": "alabama", "AK": "alaska", "AZ": "arizona", "AR": "arkansas",
     "CA": "california", "CO": "colorado", "CT": "connecticut", "DE": "delaware",
@@ -378,7 +376,6 @@ def db_mls_seen_recently(mls_number: str) -> dict | None:
 
 
 def db_batch_seen_recently(property_ids: list[str]) -> set[str]:
-    """Return set of property_ids seen within suppression window."""
     if not property_ids:
         return set()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
@@ -418,7 +415,8 @@ def db_upsert_seen(mls_number: str, slug: str, score: int, tier: str) -> None:
 def db_insert_published(
     slug: str, mls_number: str, webflow_item_id: str,
     score: int, tier: str, category: str, headline: str,
-    hero_image_url: str, today_ct: date, is_deal_of_day: bool = False
+    hero_image_url: str, today_ct: date, is_deal_of_day: bool = False,
+    gallery_image_ids: list[str] | None = None,
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
@@ -428,6 +426,7 @@ def db_insert_published(
         "published_at": datetime.now(timezone.utc).isoformat(),
         "published_date_ct": today_ct.isoformat(),
         "is_deal_of_day": is_deal_of_day,
+        "gallery_image_ids": gallery_image_ids or [],
     }
     try:
         r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
@@ -437,9 +436,6 @@ def db_insert_published(
 
 
 def db_deal_of_day_chosen_today(today_ct: date) -> bool:
-    """True if a deal-of-the-day has already been chosen for this CT calendar day.
-    Naturally resets at CT midnight since it's scoped to today's date, same as
-    the daily publish limit counter."""
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {
         "select": "slug",
@@ -457,7 +453,6 @@ def db_deal_of_day_chosen_today(today_ct: date) -> bool:
 
 
 def db_get_active_deal_of_day() -> dict | None:
-    """Return the currently active deal-of-the-day row (any date), if any."""
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {"select": "slug,webflow_item_id", "is_deal_of_day": "eq.true", "limit": 1}
     try:
@@ -513,11 +508,8 @@ def _ra_headers() -> dict:
     return {"x-realtyapi-key": REALTYAPI_KEY}
 
 
-REALTYAPI_REALTOR_BASE = "https://realtor.realtyapi.io"
-
-
 def fetch_search_results(state_name: str, result_count: int = 50, sort_order: str = "Newest") -> list[dict]:
-    """Fetch active for-sale listings under $150K in a given state via Realtor.com."""
+    """Fetch active, non-pending for-sale listings under $150K in a given state."""
     params = {
         "location": state_name,
         "priceRange": "max:150000",
@@ -526,6 +518,7 @@ def fetch_search_results(state_name: str, result_count: int = 50, sort_order: st
         "sortOrder": sort_order,
         "hasPhotos": True,
         "seniorCommunity": False,
+        "pending": False,          # exclude pending/contingent listings at source
         "resultCount": result_count,
     }
     try:
@@ -546,7 +539,6 @@ def fetch_search_results(state_name: str, result_count: int = 50, sort_order: st
 
 
 def fetch_listing_details(property_id: str) -> dict | None:
-    """Fetch full listing details including description from Realtor.com."""
     try:
         r = requests.get(
             f"{REALTYAPI_REALTOR_BASE}/details/byid",
@@ -562,10 +554,8 @@ def fetch_listing_details(property_id: str) -> dict | None:
 
 
 def extract_description(details: dict | None) -> str:
-    """Extract listing description from Realtor.com details/byid response."""
     if not details:
         return ""
-    # Response root is 'detail', description is at detail.details.text
     detail = details.get("detail") or details
     inner = detail.get("details") or {}
     candidates = [
@@ -578,7 +568,6 @@ def extract_description(details: dict | None) -> str:
 
 
 def extract_year_built(details: dict | None) -> int:
-    """Extract year built from Realtor.com details/byid response."""
     if not details:
         return 0
     detail = details.get("detail") or details
@@ -587,15 +576,13 @@ def extract_year_built(details: dict | None) -> int:
 
 
 def normalize_listing(result: dict, description: str) -> dict | None:
-    """Normalize a Realtor.com search result into the pipeline's listing dict."""
     prop = result.get("property_id", "")
     listing_id = result.get("listing_id", "")
-    mls_id = prop  # use property_id as unique identifier
+    mls_id = prop
 
     if not prop:
         return None
 
-    # Address — flat on result
     address = result.get("address", {}) or {}
     street = address.get("line", "") or ""
     city = address.get("city", "") or ""
@@ -603,24 +590,17 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     zip_code = address.get("postal_code", "") or ""
     state_full = STATE_FULL_NAME.get(state_abbr, state_abbr)
 
-    # Price, specs — top-level fields
     list_price = parse_int(result.get("list_price") or 0)
     beds = parse_int(result.get("beds") or 0)
     baths = parse_int(result.get("baths") or 0)
     sqft = parse_int(result.get("sqft") or 0)
     lot_sqft = parse_int(result.get("lot_sqft") or 0)
     lot_acres = round(lot_sqft / 43560, 2) if lot_sqft else None
-
-    # Year built not in search results — will be null until detail call enriches it
     year_built = 0
-
-    # Direct listing URL
     listing_href = result.get("href", "")
-
-    # DOM — derive from list_date if available
     dom = 0
 
-    # Photos — plain URL strings
+    # Collect all photos as flat URL list — primary first, then rest of photos[]
     photos = []
     primary = result.get("primary_photo", "")
     if isinstance(primary, str) and primary:
@@ -632,7 +612,6 @@ def normalize_listing(result: dict, description: str) -> dict | None:
         if url and url not in photos:
             photos.append(url)
 
-    # Waterfront/pool from description
     desc_lower = description.lower()
     waterfront = any(w in desc_lower for w in [
         "waterfront", "water front", "lakefront", "lake front",
@@ -669,13 +648,6 @@ def normalize_listing(result: dict, description: str) -> dict | None:
 
 
 def fetch_listings() -> list[dict]:
-    """
-    Rotate through US states, collect up to 50 unique active listings under $150K.
-    Uses Realtor.com via RealtyAPI for nationwide coverage.
-    Fetches full details per listing to get description.
-    Returns normalized listing dicts.
-    Max 1 publishable candidate per state to ensure geographic diversity.
-    """
     target = 50
     collected = []
     seen_ids = set()
@@ -683,7 +655,6 @@ def fetch_listings() -> list[dict]:
     states = US_STATES.copy()
     random.shuffle(states)
 
-    # Pick a random sort order for this entire run — different runs hit different listing pools
     sort_order = random.choice(REALTYAPI_SORT_ORDERS)
     log.info(f"Sort order this run: {sort_order}")
 
@@ -695,10 +666,8 @@ def fetch_listings() -> list[dict]:
         if not results:
             continue
 
-        # Shuffle within state to avoid hitting the same top listings every run
         random.shuffle(results)
 
-        # Batch check which property_ids have been seen recently — one query per state
         all_prop_ids = [r.get("property_id", "") for r in results if r.get("property_id")]
         seen_prop_ids = db_batch_seen_recently(all_prop_ids)
         log.info(f"[{state}] {len(seen_prop_ids)}/{len(all_prop_ids)} already seen")
@@ -711,11 +680,9 @@ def fetch_listings() -> list[dict]:
             if not prop_id or prop_id in seen_ids:
                 continue
 
-            # Skip listings already seen within suppression window
             if prop_id in seen_prop_ids:
                 continue
 
-            # Fetch full details for description and year built
             details = fetch_listing_details(prop_id)
             time.sleep(0.2)
 
@@ -726,17 +693,15 @@ def fetch_listings() -> list[dict]:
             if not listing:
                 continue
 
-            # Enrich with year_built from detail call
             listing["details"]["yearBuilt"] = year_built
             listing["_state"] = state
 
-            # Skip if price is 0 or missing
             if listing["listPrice"] <= 0:
                 continue
 
             seen_ids.add(prop_id)
             collected.append(listing)
-            break  # 1 per state, move on
+            break
 
     log.info(f"Fetched {len(collected)} total listings")
     return collected
@@ -802,7 +767,6 @@ def build_scoring_input(listing: dict) -> str:
     year       = parse_int(details.get("yearBuilt"))
     dom        = parse_int(listing.get("daysOnMarket"))
     lot_acres  = details.get("lotAcres")
-    # Nullify acreage for small multi-unit properties — lot size is the complex parcel, not buyer's land
     if lot_acres and beds <= 2 and sqft < 900:
         lot_acres = None
     acreage    = str(lot_acres) if lot_acres else "null"
@@ -835,10 +799,6 @@ def parse_scoring_output(text: str) -> dict:
 
 
 def prefilter_listing(listing: dict) -> bool:
-    """
-    Quick pre-filter before calling Claude. Returns False if listing should be auto-skipped.
-    Catches obvious rejects without spending an API call.
-    """
     details = listing.get("details", {})
     description = details.get("description", "") or ""
     desc_lower = description.lower()
@@ -849,7 +809,6 @@ def prefilter_listing(listing: dict) -> bool:
     waterfront = details.get("waterfront", False)
     pool = details.get("pool", False)
 
-    # Floor qualifiers — always score regardless of description
     has_floor = (
         waterfront
         or pool
@@ -860,12 +819,10 @@ def prefilter_listing(listing: dict) -> bool:
     if has_floor:
         return True
 
-    # Auto-skip: no description and no floor qualifier
     if len(description.strip()) < 30:
         log.info(f"[PREFILTER] Skipping — no description, no floor qualifier")
         return False
 
-    # Auto-skip: pure investor/flipper language with no redeeming signals
     flipper_signals = ["bring your vision", "investor special", "blank canvas", "as-is", "cash only", "cash-only"]
     character_signals = ["hardwood", "original", "fireplace", "porch", "beams", "stained glass", "victorian",
                          "craftsman", "bungalow", "farmhouse", "barn", "garage", "basement", "renovated",
@@ -876,7 +833,6 @@ def prefilter_listing(listing: dict) -> bool:
         log.info(f"[PREFILTER] Skipping — investor language, no character signals")
         return False
 
-    # Auto-skip: manufactured/mobile home
     if any(w in desc_lower for w in ["manufactured", "mobile home", "modular", "double wide", "doublewide", "single wide"]):
         log.info(f"[PREFILTER] Skipping — manufactured/mobile home")
         return False
@@ -932,7 +888,6 @@ def parse_content_output(text: str) -> dict:
     current_lines = []
 
     for line in text.splitlines():
-        # Strip markdown bold markers, hashes, and whitespace before matching
         stripped = line.strip().lstrip('#').strip().replace('**', '').strip()
         if stripped in ("---", "----"):
             continue
@@ -948,7 +903,6 @@ def parse_content_output(text: str) -> dict:
     if current_label and current_lines:
         result[current_label] = "\n".join(current_lines).strip()
 
-    # Log a warning if key fields are empty
     if not result["HEADLINE"] or not result["NARRATIVE"]:
         log.warning(f"[CONTENT] parse_content_output missing fields — raw text snippet: {text[:200]}")
 
@@ -959,9 +913,18 @@ def parse_content_output(text: str) -> dict:
 # Cloudflare Images
 # ---------------------------------------------------------------------------
 
-def upload_image(image_url: str, slug: str) -> str | None:
+def upload_image(image_url: str, slug: str) -> tuple[str | None, str | None]:
+    """Upload one image to Cloudflare. Returns (delivery_url, image_id) or (None, None) on failure."""
     if "imagedelivery.net" in image_url:
-        return image_url
+        # Already a Cloudflare URL — extract the image_id from the path
+        parts = image_url.rstrip("/").split("/")
+        # URL format: https://imagedelivery.net/{hash}/{image_id}/public
+        image_id = parts[-2] if len(parts) >= 3 else None
+        return image_url, image_id
+
+    # Prepend CDN base if path is relative (Realtor.com occasionally returns relative paths)
+    if not image_url.startswith("http"):
+        image_url = f"https://cdn.repliers.io/{image_url}"
 
     log.info(f"Fetching image: {image_url}")
     try:
@@ -969,7 +932,7 @@ def upload_image(image_url: str, slug: str) -> str | None:
         img_r.raise_for_status()
     except requests.RequestException as e:
         log.error(f"Failed to fetch image: {e}")
-        return None
+        return None, None
 
     log.info(f"Uploading to Cloudflare ({len(img_r.content)} bytes)...")
     try:
@@ -982,32 +945,60 @@ def upload_image(image_url: str, slug: str) -> str | None:
         cf_r.raise_for_status()
     except requests.RequestException as e:
         log.error(f"Cloudflare upload failed: {e}")
-        return None
+        return None, None
 
     cf_data = cf_r.json()
     if not cf_data.get("success"):
         log.error(f"Cloudflare error: {cf_data.get('errors')}")
-        return None
-
-    variants = cf_data.get("result", {}).get("variants", [])
-    if variants:
-        log.info(f"Cloudflare URL: {variants[0]}")
-        return variants[0]
+        return None, None
 
     image_id = cf_data.get("result", {}).get("id")
-    if image_id:
-        url = f"{CF_DELIVERY_BASE}/{image_id}/public"
-        log.info(f"Cloudflare URL (constructed): {url}")
-        return url
+    variants = cf_data.get("result", {}).get("variants", [])
 
-    return None
+    if variants:
+        delivery_url = variants[0]
+    elif image_id:
+        delivery_url = f"{CF_DELIVERY_BASE}/{image_id}/public"
+    else:
+        return None, None
+
+    log.info(f"Cloudflare upload OK: {delivery_url}")
+    return delivery_url, image_id
+
+
+def upload_gallery_images(images: list[str], slug: str) -> tuple[list[dict], list[str]]:
+    """Upload up to GALLERY_PHOTO_COUNT photos (indices 1 onward, skipping hero at index 0).
+    Returns (gallery_field_data, gallery_image_ids).
+    gallery_field_data: list of {"url": ..., "alt": ...} for Webflow MultiImage field.
+    gallery_image_ids: list of Cloudflare image IDs for cleanup on status change."""
+    gallery_field_data = []
+    gallery_image_ids = []
+
+    # photos[0] is the hero — start from index 1
+    candidates = images[1:GALLERY_PHOTO_COUNT + 1]
+
+    for i, photo_url in enumerate(candidates):
+        delivery_url, image_id = upload_image(photo_url, f"{slug}-gallery-{i + 1}")
+        if delivery_url and image_id:
+            gallery_field_data.append({"url": delivery_url, "alt": f"{slug} photo {i + 2}"})
+            gallery_image_ids.append(image_id)
+            log.info(f"Gallery photo {i + 1}/{len(candidates)} uploaded: {image_id}")
+        else:
+            log.warning(f"Gallery photo {i + 1}/{len(candidates)} failed — skipping")
+
+    log.info(f"Gallery: {len(gallery_field_data)}/{len(candidates)} photos uploaded")
+    return gallery_field_data, gallery_image_ids
 
 
 # ---------------------------------------------------------------------------
 # Webflow CMS
 # ---------------------------------------------------------------------------
 
-def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url: str, is_hero: bool) -> str | None:
+def write_webflow(
+    listing: dict, score_data: dict, content: dict,
+    hero_image_url: str, is_hero: bool,
+    gallery_field_data: list[dict] | None = None,
+) -> str | None:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
@@ -1050,6 +1041,10 @@ def write_webflow(listing: dict, score_data: dict, content: dict, hero_image_url
         "status":           WF_STATUS_ACTIVE,
         "deal-of-the-day":  is_hero,
     }
+
+    # Gallery images — only write if we have them (Webflow omits the field if key absent)
+    if gallery_field_data:
+        field_data["gallery-images"] = gallery_field_data
 
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
@@ -1099,9 +1094,6 @@ def publish_webflow(item_id: str) -> bool:
 
 
 def unset_deal_of_the_day(item_id: str) -> bool:
-    """Clear deal-of-the-day on a previously-featured item and publish the change.
-    Called right before a new deal-of-the-day is written, so only one item is
-    ever flagged true at a time."""
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
         "Content-Type": "application/json",
@@ -1127,7 +1119,6 @@ WEBFLOW_DOMAIN_IDS    = ["6a661987994ab168be06566b", "6a661986994ab168be065664"]
 
 
 def publish_site() -> bool:
-    """Trigger a full Webflow site publish to push CMS items live on the custom domain."""
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
         "Content-Type": "application/json",
@@ -1172,9 +1163,8 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         db_upsert_seen(mls_num, slug, seen["score"], seen["tier"])
         return "skipped_seen", 0.0, False
 
-    # Pre-filter obvious rejects before spending a Claude API call
     if not prefilter_listing(listing):
-        db_upsert_seen(mls_num, slug, 2, "SKIP")  # mark as seen so we don't retry
+        db_upsert_seen(mls_num, slug, 2, "SKIP")
         return "skipped_score", 0.0, False
 
     score_data, score_cost = score_listing(listing)
@@ -1199,13 +1189,16 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         return "error", total_cost, False
 
     images = listing.get("images", [])
-    hero_image_url = upload_image(images[0], slug) if images else ""
+
+    # Upload hero image (index 0)
+    hero_image_url, _ = upload_image(images[0], slug) if images else (None, None)
     if not hero_image_url:
         log.warning(f"No hero image for {slug}")
+        hero_image_url = ""
 
-    # Deal-of-the-day: only one per CT day. Claude's candidate flag only wins
-    # if the slot hasn't already been claimed by an earlier listing this run
-    # or an earlier run today.
+    # Upload gallery images (indices 1-3) — non-blocking, partial success is fine
+    gallery_field_data, gallery_image_ids = upload_gallery_images(images, slug) if len(images) > 1 else ([], [])
+
     claude_wants_hero = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
     is_hero = claude_wants_hero and dod_available
     if claude_wants_hero and not dod_available:
@@ -1216,7 +1209,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         if prior and prior.get("webflow_item_id"):
             unset_deal_of_the_day(prior["webflow_item_id"])
 
-    item_id = write_webflow(listing, score_data, content, hero_image_url, is_hero)
+    item_id = write_webflow(listing, score_data, content, hero_image_url, is_hero, gallery_field_data)
     if not item_id:
         return "error", total_cost, False
 
@@ -1228,9 +1221,10 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         score=score, tier=tier, category=score_data.get("CATEGORY", ""),
         headline=content.get("HEADLINE", ""), hero_image_url=hero_image_url,
         today_ct=today_ct, is_deal_of_day=is_hero,
+        gallery_image_ids=gallery_image_ids,
     )
 
-    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero})")
+    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, gallery_photos={len(gallery_image_ids)})")
     return "published", total_cost, is_hero
 
 
@@ -1310,7 +1304,6 @@ def run_pipeline():
             "daily_limit_hit": (count_today + published_this_run) >= DAILY_PUBLISH_LIMIT,
         })
 
-    # Full site publish to push new listings live on housesunder150k.com
     if published_this_run > 0:
         publish_site()
 
