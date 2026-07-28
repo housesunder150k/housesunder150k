@@ -8,30 +8,27 @@ and deletes gallery images from Cloudflare on status change.
 Listings are NEVER unpublished or deleted — status transitions only update the
 `status` field and (via the Webflow template) show a Sold/Pending banner.
 
-Status mapping — confirmed 2026-07-28 against live RealtyAPI responses:
-  - detail.flags.is_pending == true  -> Pending  (detail.status stays "for_sale"
-    even when pending — it does NOT flip to "pending". is_pending is the only
-    reliable signal.)
-  - detail.status == "sold"          -> Sold
-  - request error / "Home not found" -> Expired, UNLESS an address-based
-    lookup resolves the listing under a different property_id (see below)
-  - otherwise                        -> Active (no change)
+Status lookup strategy (2026-07-28):
+  Address-based lookup is now the primary path. RealtyAPI/Realtor.com can
+  reissue new property_ids on data refreshes (confirmed in production), making
+  id-based lookups unreliable. The mls_number column in published_listings now
+  stores a stable address key ("{street}|{city}|{state}") for new listings.
+  Existing listings still have property_ids in mls_number — the maintenance job
+  always looks up by address from Webflow field data, so this is handled
+  transparently regardless of what's in mls_number.
 
-KNOWN FAILURE MODE — property_id drift (confirmed 2026-07-28 on a real listing):
-RealtyAPI/Realtor.com can reissue a new property_id for the same physical
-listing on a data refresh. The id stored at ingestion time then returns
-"Home not found" forever, wrongly marking a live listing Expired. Before
-concluding Expired, this script falls back to a /details/byaddress lookup
-using the address stored in Webflow. If that resolves, the listing's true
-current status is used AND the stored mls_number is refreshed to the new
-property_id so this doesn't recur weekly for the same listing. Only if the
-address lookup also fails is the listing actually marked Expired.
+Status mapping — confirmed 2026-07-28 against live RealtyAPI responses:
+  - detail.flags.is_pending == true  -> Pending
+  - detail.status == "sold"          -> Sold
+  - address lookup fails entirely    -> Expired
+  - otherwise                        -> Active (no change)
 
 CLOUDFLARE CLEANUP (added 2026-07-28):
 When a listing transitions to Pending/Sold/Expired, gallery images uploaded
-to Cloudflare are deleted to avoid storage costs on listings no longer in
-active use. The Cloudflare image IDs are stored in published_listings.gallery_image_ids
-at ingestion time. After successful deletion, gallery_image_ids is set to NULL.
+to Cloudflare are deleted to avoid storage costs. The Cloudflare image IDs
+are stored in published_listings.gallery_image_ids at ingestion time.
+After successful deletion, gallery_image_ids is set to NULL in Supabase.
+Hero image is never deleted — it must remain for the listing page to render.
 """
 
 import os
@@ -114,16 +111,13 @@ def db_fetch_status_check_queue(limit: int) -> list[dict]:
 
 def db_update_listing_status(
     slug: str, new_status: str, checked_at: str,
-    new_mls_number: str | None = None,
     clear_gallery_ids: bool = False,
 ) -> None:
-    """Update status and advance last_status_checked_at. Optionally refresh
-    mls_number on property_id drift, and clear gallery_image_ids after deletion."""
+    """Update status and advance last_status_checked_at.
+    Optionally clear gallery_image_ids after successful Cloudflare deletion."""
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {"slug": f"eq.{slug}"}
     payload = {"status": new_status, "last_status_checked_at": checked_at}
-    if new_mls_number:
-        payload["mls_number"] = new_mls_number
     if clear_gallery_ids:
         payload["gallery_image_ids"] = None
     try:
@@ -139,7 +133,7 @@ def db_update_listing_status(
 
 def delete_cloudflare_images(image_ids: list[str], slug: str) -> bool:
     """Delete gallery images from Cloudflare when a listing goes inactive.
-    Non-blocking — logs failures but does not halt the maintenance run.
+    Hero image is never stored here and is never touched.
     Returns True if all deletions succeeded."""
     if not image_ids:
         return True
@@ -167,7 +161,7 @@ def delete_cloudflare_images(image_ids: list[str], slug: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# RealtyAPI
+# RealtyAPI — address-based status lookup
 # ---------------------------------------------------------------------------
 
 def _ra_headers() -> dict:
@@ -182,52 +176,51 @@ def _detail_to_status(detail: dict) -> str:
     return "Active"
 
 
-def check_listing_status(property_id: str, webflow_item_id: str) -> tuple[str, str | None]:
-    """Returns (status, refreshed_property_id).
-    On any request failure, returns ("Active", None) — leave unchanged, retry next rotation."""
+def check_listing_status(webflow_item_id: str) -> str:
+    """Look up current listing status by address from Webflow field data.
+    Address is the stable identifier — property_id is unreliable due to drift.
+    Returns Active/Pending/Sold/Expired.
+    On any request failure returns Active — leave unchanged, retry next rotation."""
     try:
-        r = requests.get(
-            f"{REALTYAPI_REALTOR_BASE}/details/byid",
-            headers=_ra_headers(),
-            params={"property_id": property_id},
-            timeout=30,
-        )
-        detail = r.json().get("detail") if r.status_code == 200 else None
-
-        if detail:
-            return _detail_to_status(detail), None
-
-        # property_id didn't resolve — try address fallback before concluding Expired
-        log.info(f"[{property_id}] not found by id — trying address fallback")
+        # Fetch address from Webflow
         wf = requests.get(
             f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items/{webflow_item_id}",
             headers=_wf_headers(),
             timeout=30,
         )
-        field_data = wf.json().get("fieldData", {}) if wf.status_code == 200 else {}
+        if wf.status_code != 200:
+            log.warning(f"[{webflow_item_id}] Webflow fetch failed ({wf.status_code}) — leaving unchanged")
+            return "Active"
+
+        field_data = wf.json().get("fieldData", {})
         address = field_data.get("address", "")
         city = field_data.get("city", "")
         state = field_data.get("state", "")
 
-        if address and city:
-            r = requests.get(
-                f"{REALTYAPI_REALTOR_BASE}/details/byaddress",
-                headers=_ra_headers(),
-                params={"address": f"{address}, {city}, {state}"},
-                timeout=30,
-            )
-            detail = r.json().get("detail") if r.status_code == 200 else None
-            if detail:
-                new_property_id = detail.get("property_id")
-                log.info(f"[{property_id}] resolved via address — id drifted to {new_property_id}")
-                return _detail_to_status(detail), new_property_id
+        if not address or not city:
+            log.warning(f"[{webflow_item_id}] missing address fields in Webflow — leaving unchanged")
+            return "Active"
 
-        log.info(f"[{property_id}] not found by id or address — treating as Expired")
-        return "Expired", None
+        # Primary lookup: address-based
+        r = requests.get(
+            f"{REALTYAPI_REALTOR_BASE}/details/byaddress",
+            headers=_ra_headers(),
+            params={"address": f"{address}, {city}, {state}"},
+            timeout=30,
+        )
+        detail = r.json().get("detail") if r.status_code == 200 else None
+
+        if detail:
+            status = _detail_to_status(detail)
+            log.info(f"[{address}, {city}] -> {status}")
+            return status
+
+        log.info(f"[{address}, {city}] not found by address — treating as Expired")
+        return "Expired"
 
     except requests.RequestException as e:
-        log.warning(f"[{property_id}] status check failed ({e}) — leaving unchanged")
-        return "Active", None
+        log.warning(f"[{webflow_item_id}] status check failed ({e}) — leaving unchanged")
+        return "Active"
 
 
 # ---------------------------------------------------------------------------
@@ -312,37 +305,33 @@ def run_maintenance():
 
     for row in queue:
         slug = row.get("slug")
-        property_id = row.get("mls_number")
         webflow_item_id = row.get("webflow_item_id")
         gallery_image_ids = row.get("gallery_image_ids") or []
         checked_at = datetime.now(timezone.utc).isoformat()
 
-        if not property_id or not webflow_item_id:
-            log.warning(f"[{slug}] missing property_id or webflow_item_id — skipping")
+        if not webflow_item_id:
+            log.warning(f"[{slug}] missing webflow_item_id — skipping")
             counts["errors"] += 1
             continue
 
-        new_status, refreshed_property_id = check_listing_status(property_id, webflow_item_id)
+        new_status = check_listing_status(webflow_item_id)
         time.sleep(REQUEST_SLEEP_SECS)
 
         if new_status == "Active":
-            # Advance the queue regardless — no Cloudflare work needed
-            db_update_listing_status(slug, "Active", checked_at, refreshed_property_id)
+            db_update_listing_status(slug, "Active", checked_at)
             counts["unchanged"] += 1
             continue
 
         log.info(f"[{slug}] status change: Active -> {new_status}")
 
-        # Update Webflow status field
         if not patch_webflow_status(webflow_item_id, new_status):
             counts["errors"] += 1
-            # Still advance the checked_at so the queue moves forward
-            db_update_listing_status(slug, "Active", checked_at, refreshed_property_id)
+            db_update_listing_status(slug, "Active", checked_at)
             continue
 
         changed_item_ids.append(webflow_item_id)
 
-        # Delete gallery images from Cloudflare — only on status change
+        # Delete gallery images from Cloudflare (hero image is never stored here)
         clear_gallery = False
         if gallery_image_ids:
             log.info(f"[{slug}] Deleting {len(gallery_image_ids)} gallery image(s) from Cloudflare")
@@ -351,14 +340,9 @@ def run_maintenance():
                 clear_gallery = True
                 counts["images_deleted"] += len(gallery_image_ids)
             else:
-                log.warning(f"[{slug}] Some gallery deletions failed — gallery_image_ids NOT cleared in Supabase")
+                log.warning(f"[{slug}] Some gallery deletions failed — gallery_image_ids NOT cleared")
 
-        # Update Supabase: new status + advance queue + optionally clear gallery ids
-        db_update_listing_status(
-            slug, new_status, checked_at,
-            new_mls_number=refreshed_property_id,
-            clear_gallery_ids=clear_gallery,
-        )
+        db_update_listing_status(slug, new_status, checked_at, clear_gallery_ids=clear_gallery)
         counts["changed"] += 1
 
     if changed_item_ids:

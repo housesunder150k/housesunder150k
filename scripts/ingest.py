@@ -9,6 +9,8 @@ Changes (2026-07-28):
 - pending=False added to search params — filters pending listings at source
 - Gallery photos: uploads photos[1-3] to Cloudflare, writes to gallery-images MultiImage field
 - gallery_image_ids stored in Supabase for maintenance job cleanup on status change
+- Address key replaces property_id as dedup/suppression identifier — stable across
+  RealtyAPI id drift. Format: "{street}|{city}|{state}" normalized to lowercase.
 """
 
 import os
@@ -60,7 +62,6 @@ SEEN_SUPPRESSION_DAYS  = 14
 CT_TZ                  = pytz.timezone("America/Chicago")
 GALLERY_PHOTO_COUNT    = 3  # number of additional gallery photos (indices 1-3 of photos[])
 
-# States to rotate through — shuffled each run for geographic diversity
 US_STATES = [
     "Alabama", "Arkansas", "Georgia", "Illinois", "Indiana", "Iowa", "Kansas",
     "Kentucky", "Louisiana", "Michigan", "Minnesota", "Mississippi", "Missouri",
@@ -314,6 +315,14 @@ def make_realtor_url(street: str, city: str, state: str, zip_code: str) -> str:
     return f"https://www.realtor.com/realestateandhomes-search/{path}"
 
 
+def make_address_key(street: str, city: str, state: str) -> str:
+    """Stable dedup key using property address — immune to RealtyAPI property_id drift.
+    Format: "{street}|{city}|{state}" normalized to lowercase and stripped.
+    Example: "113 gaines st|mount hope|wv"
+    """
+    return f"{street.strip().lower()}|{city.strip().lower()}|{state.strip().lower()}"
+
+
 # ---------------------------------------------------------------------------
 # Supabase
 # ---------------------------------------------------------------------------
@@ -356,12 +365,13 @@ def db_slug_published(slug: str) -> bool:
         return False
 
 
-def db_mls_seen_recently(mls_number: str) -> dict | None:
+def db_mls_seen_recently(address_key: str) -> dict | None:
+    """Check if this address was seen within the suppression window."""
     cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
     params = {
         "select": "*",
-        "mls_number": f"eq.{mls_number}",
+        "mls_number": f"eq.{address_key}",
         "last_seen_at": f"gte.{cutoff}",
         "limit": 1,
     }
@@ -375,17 +385,25 @@ def db_mls_seen_recently(mls_number: str) -> dict | None:
         return None
 
 
-def db_batch_seen_recently(property_ids: list[str]) -> set[str]:
-    if not property_ids:
+def db_batch_seen_recently(address_keys: list[str]) -> set[str]:
+    """Return set of address keys seen within suppression window."""
+    if not address_keys:
         return set()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
+    # address keys contain pipe characters — use POST with body to avoid URL encoding issues
     params = {
         "select": "mls_number",
-        "mls_number": f"in.({','.join(property_ids)})",
         "last_seen_at": f"gte.{cutoff}",
     }
+    headers = _sb_headers()
+    headers["Prefer"] = "return=representation"
+    # Use individual IN filter — Supabase REST handles comma-separated values
+    # Pipe chars in keys need special handling: query one at a time if batch fails
     try:
+        # Build filter manually to handle pipe chars safely
+        quoted = ",".join(f'"{k}"' for k in address_keys)
+        params["mls_number"] = f"in.({quoted})"
         r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
         r.raise_for_status()
         return {row["mls_number"] for row in r.json()}
@@ -394,12 +412,12 @@ def db_batch_seen_recently(property_ids: list[str]) -> set[str]:
         return set()
 
 
-def db_upsert_seen(mls_number: str, slug: str, score: int, tier: str) -> None:
+def db_upsert_seen(address_key: str, slug: str, score: int, tier: str) -> None:
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
     headers = _sb_headers()
     headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
     payload = {
-        "mls_number": mls_number,
+        "mls_number": address_key,
         "slug": slug,
         "score": score,
         "tier": tier,
@@ -518,7 +536,7 @@ def fetch_search_results(state_name: str, result_count: int = 50, sort_order: st
         "sortOrder": sort_order,
         "hasPhotos": True,
         "seniorCommunity": False,
-        "pending": False,          # exclude pending/contingent listings at source
+        "pending": False,
         "resultCount": result_count,
     }
     try:
@@ -578,7 +596,6 @@ def extract_year_built(details: dict | None) -> int:
 def normalize_listing(result: dict, description: str) -> dict | None:
     prop = result.get("property_id", "")
     listing_id = result.get("listing_id", "")
-    mls_id = prop
 
     if not prop:
         return None
@@ -590,6 +607,9 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     zip_code = address.get("postal_code", "") or ""
     state_full = STATE_FULL_NAME.get(state_abbr, state_abbr)
 
+    # Use address as the stable dedup key — property_id can drift on RealtyAPI refreshes
+    address_key = make_address_key(street, city, state_abbr)
+
     list_price = parse_int(result.get("list_price") or 0)
     beds = parse_int(result.get("beds") or 0)
     baths = parse_int(result.get("baths") or 0)
@@ -600,7 +620,6 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     listing_href = result.get("href", "")
     dom = 0
 
-    # Collect all photos as flat URL list — primary first, then rest of photos[]
     photos = []
     primary = result.get("primary_photo", "")
     if isinstance(primary, str) and primary:
@@ -620,8 +639,8 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     pool = "pool" in desc_lower
 
     return {
-        "mlsNumber": mls_id,
-        "propertyId": prop,
+        "mlsNumber": address_key,   # stable address-based dedup key
+        "propertyId": prop,         # retained for detail fetches only
         "listingId": listing_id,
         "listingHref": listing_href,
         "listPrice": list_price,
@@ -650,7 +669,7 @@ def normalize_listing(result: dict, description: str) -> dict | None:
 def fetch_listings() -> list[dict]:
     target = 50
     collected = []
-    seen_ids = set()
+    seen_address_keys = set()  # in-run dedup by address key
 
     states = US_STATES.copy()
     random.shuffle(states)
@@ -668,19 +687,35 @@ def fetch_listings() -> list[dict]:
 
         random.shuffle(results)
 
-        all_prop_ids = [r.get("property_id", "") for r in results if r.get("property_id")]
-        seen_prop_ids = db_batch_seen_recently(all_prop_ids)
-        log.info(f"[{state}] {len(seen_prop_ids)}/{len(all_prop_ids)} already seen")
+        # Build address keys for batch suppression check
+        address_keys_this_state = []
+        result_to_key = {}
+        for r in results:
+            addr = r.get("address", {}) or {}
+            key = make_address_key(
+                addr.get("line", "") or "",
+                addr.get("city", "") or "",
+                addr.get("state_code", "") or "",
+            )
+            address_keys_this_state.append(key)
+            result_to_key[r.get("property_id", "")] = key
+
+        seen_keys = db_batch_seen_recently(address_keys_this_state)
+        log.info(f"[{state}] {len(seen_keys)}/{len(address_keys_this_state)} already seen")
 
         for result in results:
             if len(collected) >= target:
                 break
 
-            prop_id = result.get("property_id", "") or result.get("propertyId", "")
-            if not prop_id or prop_id in seen_ids:
+            prop_id = result.get("property_id", "")
+            if not prop_id:
                 continue
 
-            if prop_id in seen_prop_ids:
+            address_key = result_to_key.get(prop_id, "")
+            if not address_key or address_key in seen_address_keys:
+                continue
+
+            if address_key in seen_keys:
                 continue
 
             details = fetch_listing_details(prop_id)
@@ -699,7 +734,7 @@ def fetch_listings() -> list[dict]:
             if listing["listPrice"] <= 0:
                 continue
 
-            seen_ids.add(prop_id)
+            seen_address_keys.add(address_key)
             collected.append(listing)
             break
 
@@ -916,13 +951,10 @@ def parse_content_output(text: str) -> dict:
 def upload_image(image_url: str, slug: str) -> tuple[str | None, str | None]:
     """Upload one image to Cloudflare. Returns (delivery_url, image_id) or (None, None) on failure."""
     if "imagedelivery.net" in image_url:
-        # Already a Cloudflare URL — extract the image_id from the path
         parts = image_url.rstrip("/").split("/")
-        # URL format: https://imagedelivery.net/{hash}/{image_id}/public
         image_id = parts[-2] if len(parts) >= 3 else None
         return image_url, image_id
 
-    # Prepend CDN base if path is relative (Realtor.com occasionally returns relative paths)
     if not image_url.startswith("http"):
         image_url = f"https://cdn.repliers.io/{image_url}"
 
@@ -967,14 +999,10 @@ def upload_image(image_url: str, slug: str) -> tuple[str | None, str | None]:
 
 
 def upload_gallery_images(images: list[str], slug: str) -> tuple[list[dict], list[str]]:
-    """Upload up to GALLERY_PHOTO_COUNT photos (indices 1 onward, skipping hero at index 0).
-    Returns (gallery_field_data, gallery_image_ids).
-    gallery_field_data: list of {"url": ..., "alt": ...} for Webflow MultiImage field.
-    gallery_image_ids: list of Cloudflare image IDs for cleanup on status change."""
+    """Upload up to GALLERY_PHOTO_COUNT photos (indices 1 onward, skipping hero at index 0)."""
     gallery_field_data = []
     gallery_image_ids = []
 
-    # photos[0] is the hero — start from index 1
     candidates = images[1:GALLERY_PHOTO_COUNT + 1]
 
     for i, photo_url in enumerate(candidates):
@@ -1042,7 +1070,6 @@ def write_webflow(
         "deal-of-the-day":  is_hero,
     }
 
-    # Gallery images — only write if we have them (Webflow omits the field if key absent)
     if gallery_field_data:
         field_data["gallery-images"] = gallery_field_data
 
@@ -1144,27 +1171,27 @@ def publish_site() -> bool:
 # ---------------------------------------------------------------------------
 
 def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple[str, float, bool]:
-    addr    = listing.get("address", {})
-    price   = parse_int(listing.get("listPrice", 0))
-    city    = addr.get("city", "unknown")
-    mls_num = listing.get("mlsNumber", "unknown")
-    slug    = make_slug(city, price)
+    addr       = listing.get("address", {})
+    price      = parse_int(listing.get("listPrice", 0))
+    city       = addr.get("city", "unknown")
+    address_key = listing.get("mlsNumber", "unknown")  # address-based stable key
+    slug       = make_slug(city, price)
     total_cost = 0.0
 
-    log.info(f"--- Processing: {city} ${make_price_display(price)} (MLS {mls_num}) ---")
+    log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) ---")
 
     if db_slug_published(slug):
         log.info(f"Skipping {slug} — already published")
         return "skipped_dedup", 0.0, False
 
-    seen = db_mls_seen_recently(mls_num)
+    seen = db_mls_seen_recently(address_key)
     if seen:
-        log.info(f"Skipping MLS {mls_num} — seen {seen['times_seen']}x, score={seen['score']} within {SEEN_SUPPRESSION_DAYS}d")
-        db_upsert_seen(mls_num, slug, seen["score"], seen["tier"])
+        log.info(f"Skipping {address_key} — seen score={seen['score']} within {SEEN_SUPPRESSION_DAYS}d")
+        db_upsert_seen(address_key, slug, seen["score"], seen["tier"])
         return "skipped_seen", 0.0, False
 
     if not prefilter_listing(listing):
-        db_upsert_seen(mls_num, slug, 2, "SKIP")
+        db_upsert_seen(address_key, slug, 2, "SKIP")
         return "skipped_score", 0.0, False
 
     score_data, score_cost = score_listing(listing)
@@ -1174,7 +1201,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
 
     score = score_data.get("SCORE", 0)
     tier  = score_data.get("TIER", "SKIP")
-    db_upsert_seen(mls_num, slug, score, tier)
+    db_upsert_seen(address_key, slug, score, tier)
 
     if score <= 5:
         log.info(f"Score {score} <= 5 — discarding {slug}")
@@ -1190,19 +1217,17 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
 
     images = listing.get("images", [])
 
-    # Upload hero image (index 0)
     hero_image_url, _ = upload_image(images[0], slug) if images else (None, None)
     if not hero_image_url:
         log.warning(f"No hero image for {slug}")
         hero_image_url = ""
 
-    # Upload gallery images (indices 1-3) — non-blocking, partial success is fine
     gallery_field_data, gallery_image_ids = upload_gallery_images(images, slug) if len(images) > 1 else ([], [])
 
     claude_wants_hero = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
     is_hero = claude_wants_hero and dod_available
     if claude_wants_hero and not dod_available:
-        log.info(f"{slug} qualifies for deal-of-the-day but the slot is already taken today — skipping flag")
+        log.info(f"{slug} qualifies for deal-of-the-day but slot already taken today")
 
     if is_hero:
         prior = db_get_active_deal_of_day()
@@ -1217,7 +1242,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         return "error", total_cost, False
 
     db_insert_published(
-        slug=slug, mls_number=mls_num, webflow_item_id=item_id,
+        slug=slug, mls_number=address_key, webflow_item_id=item_id,
         score=score, tier=tier, category=score_data.get("CATEGORY", ""),
         headline=content.get("HEADLINE", ""), hero_image_url=hero_image_url,
         today_ct=today_ct, is_deal_of_day=is_hero,
