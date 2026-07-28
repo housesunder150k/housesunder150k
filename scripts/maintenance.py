@@ -12,8 +12,20 @@ Status mapping — confirmed 2026-07-27 against live RealtyAPI responses:
     even when pending — it does NOT flip to "pending". is_pending is the only
     reliable signal.)
   - detail.status == "sold"          -> Sold
-  - request error / "Home not found" -> Expired (delisted, no clear signal)
+  - request error / "Home not found" -> Expired, UNLESS an address-based
+    lookup resolves the listing under a different property_id (see below)
   - otherwise                        -> Active (no change)
+
+KNOWN FAILURE MODE — property_id drift (confirmed 2026-07-28 on a real listing):
+RealtyAPI/Realtor.com can reissue a new property_id for the same physical
+listing on a data refresh, even though nothing about the listing changed. The
+id stored at ingestion time then returns "Home not found" forever, which would
+wrongly mark a live listing Expired. Before concluding Expired, this script
+falls back to a /details/byaddress lookup using the address stored in Webflow.
+If that resolves, the listing's true current status is used AND the stored
+mls_number is refreshed to the new property_id so this doesn't recur weekly
+for the same listing. Only if the address lookup also fails to find anything
+is the listing actually marked Expired.
 """
 
 import os
@@ -97,12 +109,18 @@ def db_fetch_status_check_queue(limit: int) -> list[dict]:
         return []
 
 
-def db_update_listing_status(slug: str, new_status: str, checked_at: str) -> None:
+def db_update_listing_status(
+    slug: str, new_status: str, checked_at: str, new_mls_number: str | None = None
+) -> None:
     """Always called after a check, whether or not status changed —
-    advances last_status_checked_at so the rotating queue moves forward."""
+    advances last_status_checked_at so the rotating queue moves forward.
+    If the property_id had drifted (see module docstring), new_mls_number
+    refreshes the stored id so this listing doesn't hit the fallback again."""
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {"slug": f"eq.{slug}"}
     payload = {"status": new_status, "last_status_checked_at": checked_at}
+    if new_mls_number:
+        payload["mls_number"] = new_mls_number
     try:
         r = requests.patch(url, headers=_sb_headers(), params=params, json=payload, timeout=10)
         r.raise_for_status()
@@ -118,9 +136,23 @@ def _ra_headers() -> dict:
     return {"x-realtyapi-key": REALTYAPI_KEY}
 
 
-def check_listing_status(property_id: str) -> str:
-    """Returns one of: Active, Pending, Sold, Expired.
-    See module docstring for the confirmed field mapping."""
+def _detail_to_status(detail: dict) -> str:
+    """Maps a resolved `detail` dict to Active/Pending/Sold. See module
+    docstring for the confirmed field mapping."""
+    if (detail.get("flags") or {}).get("is_pending"):
+        return "Pending"
+    if detail.get("status") == "sold":
+        return "Sold"
+    return "Active"
+
+
+def check_listing_status(property_id: str, webflow_item_id: str) -> tuple[str, str | None]:
+    """Returns (status, refreshed_property_id) — refreshed_property_id is
+    only set when the stored id had drifted (see KNOWN FAILURE MODE above)
+    and the address fallback found the listing under a new one; the caller
+    persists it to Supabase so this listing doesn't hit the fallback again.
+    On any request failure, returns ("Active", None) — i.e. "couldn't verify,
+    leave it alone, try again next rotation" rather than risk a false Expired."""
     try:
         r = requests.get(
             f"{REALTYAPI_REALTOR_BASE}/details/byid",
@@ -128,25 +160,43 @@ def check_listing_status(property_id: str) -> str:
             params={"property_id": property_id},
             timeout=30,
         )
-        if r.status_code != 200:
-            log.info(f"[{property_id}] non-200 ({r.status_code}) — treating as Expired")
-            return "Expired"
-        data = r.json()
+        detail = r.json().get("detail") if r.status_code == 200 else None
+
+        if detail:
+            return _detail_to_status(detail), None
+
+        # property_id didn't resolve — before concluding Expired, look the
+        # listing up by address in case RealtyAPI just reissued a new id for it.
+        log.info(f"[{property_id}] not found by id — trying address fallback")
+        wf = requests.get(
+            f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items/{webflow_item_id}",
+            headers=_wf_headers(),
+            timeout=30,
+        )
+        field_data = wf.json().get("fieldData", {}) if wf.status_code == 200 else {}
+        address = field_data.get("address", "")
+        city = field_data.get("city", "")
+        state = field_data.get("state", "")
+
+        if address and city:
+            r = requests.get(
+                f"{REALTYAPI_REALTOR_BASE}/details/byaddress",
+                headers=_ra_headers(),
+                params={"address": f"{address}, {city}, {state}"},
+                timeout=30,
+            )
+            detail = r.json().get("detail") if r.status_code == 200 else None
+            if detail:
+                new_property_id = detail.get("property_id")
+                log.info(f"[{property_id}] resolved via address — id drifted to {new_property_id}")
+                return _detail_to_status(detail), new_property_id
+
+        log.info(f"[{property_id}] not found by id or address — treating as Expired")
+        return "Expired", None
+
     except requests.RequestException as e:
-        log.warning(f"[{property_id}] request failed ({e}) — treating as Expired")
-        return "Expired"
-
-    detail = data.get("detail")
-    if not detail:
-        # e.g. {"message": "500: Home not found.", "detail": {}}
-        log.info(f"[{property_id}] no detail in response ({data.get('message')}) — treating as Expired")
-        return "Expired"
-
-    if (detail.get("flags") or {}).get("is_pending"):
-        return "Pending"
-    if detail.get("status") == "sold":
-        return "Sold"
-    return "Active"
+        log.warning(f"[{property_id}] status check failed ({e}) — leaving unchanged, will retry next rotation")
+        return "Active", None
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +294,13 @@ def run_maintenance():
             counts["errors"] += 1
             continue
 
-        new_status = check_listing_status(property_id)
+        new_status, refreshed_property_id = check_listing_status(property_id, webflow_item_id)
         time.sleep(REQUEST_SLEEP_SECS)
 
         # Always advance last_status_checked_at, regardless of outcome —
-        # keeps the rotating queue moving forward.
-        db_update_listing_status(slug, new_status, checked_at)
+        # keeps the rotating queue moving forward. Also persist a refreshed
+        # property_id if the address fallback found one (see module docstring).
+        db_update_listing_status(slug, new_status, checked_at, refreshed_property_id)
 
         if new_status == "Active":
             counts["unchanged"] += 1
