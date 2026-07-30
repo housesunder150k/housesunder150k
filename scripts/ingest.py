@@ -590,6 +590,19 @@ def db_get_active_deal_of_day() -> dict | None:
         return None
 
 
+def db_unset_deal_of_day(slug: str) -> None:
+    """Set is_deal_of_day = false in Supabase for the outgoing Deal of the Day."""
+    url = f"{SUPABASE_URL}/rest/v1/published_listings"
+    params = {"slug": f"eq.{slug}"}
+    try:
+        r = requests.patch(url, headers=_sb_headers(), params=params,
+                           json={"is_deal_of_day": False}, timeout=10)
+        r.raise_for_status()
+        log.info(f"Supabase: cleared is_deal_of_day for {slug}")
+    except Exception as e:
+        log.error(f"Supabase unset_deal_of_day error ({slug}): {e}")
+
+
 def db_insert_run(run_data: dict) -> int | None:
     url = f"{SUPABASE_URL}/rest/v1/pipeline_runs"
     headers = _sb_headers()
@@ -1227,7 +1240,11 @@ def publish_webflow(item_id: str) -> bool:
     return True
 
 
-def unset_deal_of_the_day(item_id: str) -> bool:
+def unset_deal_of_the_day(prior: dict) -> bool:
+    """Clear deal-of-the-day from outgoing holder in both Webflow and Supabase."""
+    item_id = prior.get("webflow_item_id", "")
+    slug    = prior.get("slug", "")
+
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
         "Content-Type": "application/json",
@@ -1242,9 +1259,12 @@ def unset_deal_of_the_day(item_id: str) -> bool:
         )
         r.raise_for_status()
     except requests.RequestException as e:
-        log.error(f"Failed to clear previous deal-of-the-day ({item_id}): {e}")
+        log.error(f"Failed to clear previous deal-of-the-day in Webflow ({item_id}): {e}")
         return False
-    log.info(f"Cleared previous deal-of-the-day: {item_id}")
+
+    log.info(f"Cleared deal-of-the-day in Webflow: {item_id}")
+    if slug:
+        db_unset_deal_of_day(slug)
     return publish_webflow(item_id)
 
 
@@ -1339,7 +1359,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
     if is_hero:
         prior = db_get_active_deal_of_day()
         if prior and prior.get("webflow_item_id"):
-            unset_deal_of_the_day(prior["webflow_item_id"])
+            unset_deal_of_the_day(prior)
 
     item_id = write_webflow(listing, score_data, content, hero_image_url, is_hero, gallery_field_data)
     if not item_id:
