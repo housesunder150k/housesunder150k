@@ -71,10 +71,15 @@ CT_TZ                  = pytz.timezone("America/Chicago")
 GALLERY_PHOTO_COUNT    = 3  # number of additional gallery photos (indices 1-3 of photos[])
 
 US_STATES = [
-    "Alabama", "Arkansas", "Georgia", "Illinois", "Indiana", "Iowa", "Kansas",
-    "Kentucky", "Louisiana", "Michigan", "Minnesota", "Mississippi", "Missouri",
-    "Nebraska", "North Carolina", "Ohio", "Oklahoma", "Pennsylvania",
-    "South Carolina", "Tennessee", "Texas", "Virginia", "West Virginia", "Wisconsin",
+    "Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado",
+    "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho",
+    "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana",
+    "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", "Mississippi",
+    "Missouri", "Montana", "Nebraska", "Nevada", "New Hampshire", "New Jersey",
+    "New Mexico", "New York", "North Carolina", "North Dakota", "Ohio", "Oklahoma",
+    "Oregon", "Pennsylvania", "Rhode Island", "South Carolina", "South Dakota",
+    "Tennessee", "Texas", "Utah", "Vermont", "Virginia", "Washington",
+    "West Virginia", "Wisconsin", "Wyoming",
 ]
 
 REALTYAPI_SORT_ORDERS = ["Newest", "Relevant", "Price_Low", "Price_High"]
@@ -773,8 +778,7 @@ def fetch_listings() -> list[dict]:
     collected = []
     seen_address_keys = set()  # in-run dedup by address key
 
-    states = US_STATES.copy()
-    random.shuffle(states)
+    states = random.sample(US_STATES, min(20, len(US_STATES)))
 
     sort_order = random.choice(REALTYAPI_SORT_ORDERS)
     log.info(f"Sort order this run: {sort_order}")
