@@ -540,7 +540,8 @@ def db_upsert_seen(address_key: str, slug: str, score: int, tier: str) -> None:
 def db_insert_published(
     slug: str, mls_number: str, webflow_item_id: str,
     score: int, tier: str, category: str, headline: str,
-    hero_image_url: str, today_ct: date, is_deal_of_day: bool = False,
+    hero_image_url: str, today_ct: date, price: int = 0,
+    is_deal_of_day: bool = False,
     gallery_image_ids: list[str] | None = None,
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
@@ -550,6 +551,7 @@ def db_insert_published(
         "hero_image_url": hero_image_url,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "published_date_ct": today_ct.isoformat(),
+        "price": price,
         "is_deal_of_day": is_deal_of_day,
         "gallery_image_ids": gallery_image_ids or [],
     }
@@ -1372,7 +1374,8 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         slug=slug, mls_number=address_key, webflow_item_id=item_id,
         score=score, tier=tier, category=score_data.get("CATEGORY", ""),
         headline=content.get("HEADLINE", ""), hero_image_url=hero_image_url,
-        today_ct=today_ct, is_deal_of_day=is_hero,
+        today_ct=today_ct, price=price,
+        is_deal_of_day=is_hero,
         gallery_image_ids=gallery_image_ids,
     )
 
