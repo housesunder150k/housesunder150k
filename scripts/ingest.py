@@ -11,6 +11,14 @@ Changes (2026-07-28):
 - gallery_image_ids stored in Supabase for maintenance job cleanup on status change
 - Address key replaces property_id as dedup/suppression identifier — stable across
   RealtyAPI id drift. Format: "{street}|{city}|{state}" normalized to lowercase.
+
+Changes (2026-07-29):
+- HEADLINE prompt updated: search-friendly title format replacing period-separated headline style.
+  New format: "[Year] [City] [Property Type] with [Key Feature] — $[Price]"
+  Example: "1931 Detroit Home with Double Lot and French Doors — $150,000"
+- Tags field added: up to 5 tags derived from CATEGORY, KEY_HOOKS, and listing data.
+  No extra Claude call — tags generated in generate_tags() from existing scored data.
+  Written to new Webflow "tags" PlainText field as comma-separated string.
 """
 
 import os
@@ -265,8 +273,10 @@ Produce exactly these four outputs, clearly labeled:
 ---
 
 HEADLINE
-One punchy line under 10 words. Lead with the most compelling fact, never the address. Use periods between phrases, not commas.
-Examples: "1891 Brick Victorian. Original Stained Glass. $87,000." or "Three Acres and a Creek. $94,000." or "New Construction in Milwaukee. $105,000."
+A search-friendly title under 15 words. Lead with the year built (if pre-1980) or the most distinctive feature, then the city, then the key selling point, then the price with an em dash before it.
+Format: "[Year] [City] [Property Type] with [Key Feature] — $[Price]"
+Examples: "1931 Detroit Home with Double Lot and French Doors — $150,000" or "Three-Acre Iowa Property with Creek and Barn — $94,000" or "New Construction in Milwaukee with Four Bedrooms — $105,000" or "1908 Ohio Brick Victorian with Original Woodwork — $87,000"
+Rules: No periods between phrases. Use " — " (space-dash-space) before the price. Never start with the street address. If no year is available or the home is post-1980, lead with the most distinctive feature or location.
 
 NARRATIVE
 300 to 400 words. Follow the structure above.
@@ -280,6 +290,89 @@ One or two sentences, under 30 words. The single most compelling thing about thi
 ---
 
 Return all four outputs with those exact labels. Nothing else."""
+
+
+# ---------------------------------------------------------------------------
+# Tag generation — derived from scored data, no extra Claude call
+# ---------------------------------------------------------------------------
+
+TAG_MAP = {
+    # Category-based tags
+    "WATERFRONT":      "Waterfront",
+    "ACREAGE":         "Acreage",
+    "HISTORIC":        "Historic",
+    "RENOVATED":       "Renovated",
+    "NEW_CONSTRUCTION": "New Construction",
+    "CHARACTER":       "Character Home",
+    "HIDDEN_GEM":      "Hidden Gem",
+    # Key hook signal tags
+    "pool":            "Pool",
+    "barn":            "Barn",
+    "garage":          "Garage",
+    "basement":        "Finished Basement",
+    "fireplace":       "Fireplace",
+    "acreage":         "Acreage",
+    "waterfront":      "Waterfront",
+    "lake":            "Lake Access",
+    "creek":           "Creek",
+    "wooded":          "Wooded Lot",
+    "farmhouse":       "Farmhouse",
+    "victorian":       "Victorian",
+    "craftsman":       "Craftsman",
+    "log cabin":       "Log Cabin",
+    "stone":           "Stone Construction",
+    "new roof":        "New Roof",
+    "new hvac":        "Updated HVAC",
+    "rental":          "Income Potential",
+    "airbnb":          "Income Potential",
+    "income":          "Income Potential",
+}
+
+
+def generate_tags(score_data: dict, listing: dict) -> str:
+    """Derive up to 5 tags from category, key hooks, and listing data. No Claude call."""
+    tags = []
+    seen = set()
+
+    def add(tag: str):
+        if tag not in seen and len(tags) < 5:
+            tags.append(tag)
+            seen.add(tag)
+
+    # 1. Primary category tag
+    category = score_data.get("CATEGORY", "").upper()
+    if category in TAG_MAP:
+        add(TAG_MAP[category])
+
+    # 2. Scan key hooks for signal tags
+    hooks_raw = score_data.get("KEY_HOOKS", "").lower()
+    for signal, tag in TAG_MAP.items():
+        if signal.lower() in hooks_raw:
+            add(tag)
+
+    # 3. Scan listing details directly
+    details = listing.get("details", {})
+    desc_lower = (details.get("description", "") or "").lower()
+
+    if details.get("waterfront") and "Waterfront" not in seen:
+        add("Waterfront")
+    if details.get("pool") and "Pool" not in seen:
+        add("Pool")
+    lot_acres = details.get("lotAcres")
+    if lot_acres and lot_acres >= 0.5 and "Acreage" not in seen:
+        add("Acreage")
+    year_built = parse_int(details.get("yearBuilt"))
+    if 0 < year_built <= 1950 and "Historic" not in seen:
+        add("Historic")
+
+    # 4. Description signal scan for remaining slots
+    for signal, tag in TAG_MAP.items():
+        if len(tags) >= 5:
+            break
+        if signal.lower() in desc_lower:
+            add(tag)
+
+    return ", ".join(tags)
 
 
 # ---------------------------------------------------------------------------
@@ -1075,6 +1168,7 @@ def write_webflow(
         "state-page-url":   f"https://housesunder150k.com/states/{STATE_TO_SLUG.get(state_abbr, '')}" if state_abbr in STATE_TO_SLUG else None,
         "affiliate-url":    listing.get("listingHref") or make_realtor_url(address, city, state_abbr, zip_code),
         "social-caption":   content.get("SOCIAL_CAPTION", ""),
+        "tags":             generate_tags(score_data, listing),
         "status":           WF_STATUS_ACTIVE,
         "deal-of-the-day":  is_hero,
     }
