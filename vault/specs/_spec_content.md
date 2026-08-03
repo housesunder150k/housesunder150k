@@ -2,7 +2,7 @@
 project: HousesUnder150K
 file: spec_content
 type: living — update when content prompt or voice guidelines change
-last_updated: 2026-07-29
+last_updated: 2026-08-03
 prompt_location: scripts/prompts/deals-under-150k.md (codebase)
 ---
 
@@ -18,7 +18,9 @@ This HousesUnder150K content spec defines the content generation prompt (Claude 
 
 The content generation prompt is Claude Call 2 in the two-prompt pipeline. It runs only for listings that scored 6 or above. It receives the listing data plus the CATEGORY and KEY_HOOKS from the scoring call, and produces four outputs: HEADLINE, NARRATIVE, SOCIAL_CAPTION, SHORT_SUMMARY.
 
-The voice benchmark is Michelle Bowers at theoldhouselife.com — 413,900 monthly visits, peaked at 1M. Her format: conversational, enthusiastic, specific, honest. The listing is the content. The writer is the curator.
+The voice benchmark is Michelle Bowers at theoldhouselife.com — 413,900 monthly visits, peaked at 1M. Her format: conversational, specific, honest. The listing is the content. The writer is the curator.
+
+Prompt overhauled 2026-08-03: explicit structure template removed entirely. Voice rules replaced with a prohibited constructions list, each with a concrete example of the violation. The property now dictates the shape of the narrative rather than a three-beat skeleton.
 
 ---
 
@@ -96,23 +98,37 @@ Homepage card preview text and Deal of the Day section subtext. Under 30 words.
 ## HousesUnder150K Content Spec — Voice Rules (Non-Negotiable)
 
 **Banned words and phrases — never appear in any generated content:**
-- nestled, charming, cozy, quaint
-- rare find, hidden gem (as a descriptor — the category name is fine)
-- open concept, open floor plan
-- move-in ready (unless directly supported by specifics)
-- stunning, breathtaking, gorgeous, beautiful
-- perfect for, ideal for, great for
-- turnkey (unless supported by specific renovation details)
-- motivated seller (in narrative — this is a scoring signal, not editorial copy)
-- priced to sell, won't last, act fast, don't miss
+nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled
+
+**Prohibited constructions (each with example violation):**
+- No antithesis: ❌ "It doesn't fight the age of the house, it works alongside it."
+- No corrective negation (including positive-framed versions): ❌ "This isn't a flipper special." ❌ "You don't find this in anything built recently."
+- No paragraph pinning: ❌ Para 1 ends on the porch → Para 2 opens "That porch sets the tone for everything inside."
+- No parataxis: ❌ "Wood floors. Dark trim. A fireplace. 1908."
+- No summary beats: ❌ "...a pool, a garage, and a shed. For a house at this price, that's a lot of infrastructure."
+- No rhetorical crutches: ❌ "The wraparound porch alone is worth stopping for."
+- No negative parallelisms: ❌ "Layouts like this don't exist in new construction. You have to find them in houses like this."
+- No negative anaphoras: ❌ "No updates needed. No contractor required. No surprises waiting."
+- No contrasting pairs: ❌ "Small town, big lot."
+- No rule of three: ❌ "A pool, a garage, and a wraparound porch."
+- No em dashes, en dashes, or hyphens as connectors in narrative or caption
+- No throat-clearing openers: ❌ "What makes this listing worth a look is..."
+- No landing sentences: ❌ "For a 116-year-old house in a small Ohio city, that's an unusual amount of infrastructure."
+- No setup/payoff: ❌ "The wraparound porch alone is worth stopping for. It runs the full front of the house."
+- No parallel sentence structures within a paragraph
+- No stacked noun phrases: ❌ "Wood floors, dark trim, ornate mantel, bay window, jetted tub."
+- No filler intensifiers: genuinely, really, truly, actually
+- No corporate-register verbs: leverage, underscore, reflect, offer, feature, boast
+- No nominalization: ❌ "a replacement of the roof" → ✅ "the roof was replaced"
+- No hedging qualifiers: ❌ "The photos suggest the floors may be original hardwood."
+- No performed enthusiasm. No exclamation points.
 
 **Voice principles:**
-- Short sentences. Active voice. No padding.
+- Write for the spoken voice. If you wouldn't say it out loud, cut it.
+- Vary sentence length unpredictably — whatever the thought needs.
 - Precision over approximation ("6.13 acres" not "over six acres")
-- Real enthusiasm, not manufactured enthusiasm
-- Honest hedging when something is uncertain
+- No template. The property dictates the shape of the narrative.
 - The listing does the work. The writer gets out of the way.
-- Discovery register — the reader is finding something, not being sold something
 
 ---
 

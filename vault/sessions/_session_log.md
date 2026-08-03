@@ -9,6 +9,13 @@ last_updated: 2026-08-03
 
 # HousesUnder150K Session Log
 
+## August 3, 2026 — Content prompt overhaul
+- `CONTENT_PROMPT_TEMPLATE` in `ingest.py` rewritten. Explicit three-beat structure template removed. Voice rules replaced with prohibited constructions list, each with a concrete violation example: antithesis, corrective negation, paragraph pinning, parataxis, summary beats, rhetorical crutches, negative parallelisms, negative anaphoras, contrasting pairs, rule of three, landing sentences, setup/payoff, parallel sentence structures, stacked noun phrases, filler intensifiers, corporate-register verbs, nominalization, hedging qualifiers, performed enthusiasm.
+- Tested against live listing (Alliance OH, 1908 bungalow). Dramatic quality improvement vs prior prompt. One corrective negation violation caught and added as second example to that rule.
+- `_spec_content.md` updated to reflect new voice rules and prohibited constructions.
+
+---
+
 ## August 3, 2026 — Slug format fix
 - `make_slug()` updated: signature changed from `(city, price)` to `(street, city, state)`. Produces address-based slugs (`409-n-davis-ave-oakland-ne`) instead of `oakland-110000`.
 - Both call sites updated in `process_listing()` and `write_webflow()`. Maintenance job unaffected — uses `webflow_item_id`, not slug.
