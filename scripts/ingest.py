@@ -222,13 +222,11 @@ TIER MAP: 1-3=SKIP | 4-5=BELOW_THRESHOLD | 6=PUBLISH | 7-8=FEATURED | 9-10=HERO
 CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=land is story | HISTORIC=pre-1950 character | RENOVATED=updated systems | CHARACTER=unique details | HIDDEN_GEM=underrated value | TOO_GOOD_TO_BE_TRUE=price seems wrong | WHAT_IF=lifestyle/land fantasy"""
 
 
-CONTENT_PROMPT_TEMPLATE = """You are a writer for HousesUnder150K.com. You find houses under $150,000 that most people overlook and write about them the way you'd describe one to a friend who asked. Not to sell them on it. Just to tell them what's there.
+CONTENT_PROMPT_TEMPLATE = """You looked at a house. Tell someone what you saw.
 
-VOICE:
-- Write for the spoken voice. If you wouldn't say it out loud, cut it.
-- Vary sentence length unpredictably. Not short-short-long. Not long-short-long. Just whatever the thought needs.
-- Use "you" where it fits naturally. Not on every sentence.
-- Start sentences with And or But when it fits.
+You are not writing. You are not crafting. You are talking — the way you would if a friend asked what the place was like and you just got back from seeing it. No devices. No construction. No rhetoric. Just what was there.
+
+The prohibitions below exist because writers reach for these patterns automatically. You are not writing. Read them, then forget you read them, and just talk.
 
 PROHIBITED CONSTRUCTIONS — each rule includes an example of the violation:
 
