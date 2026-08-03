@@ -1,4 +1,18 @@
-# Real Estate Content Platform — Concept Document
+---
+project: HousesUnder150K
+file: real_estate_content_platform_concept
+type: reference — strategic concept document for future platform expansion
+last_updated: 2026-07-29
+---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
+# HousesUnder150K — Real Estate Content Platform Concept
+
+This HousesUnder150K concept document defines the strategic vision for a multi-theme automated real estate content platform. HousesUnder150K.com is POC Site 1 of this broader plan.
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 *Draft v0.1 — July 2026*
 
 ---
@@ -10,6 +24,8 @@ An automated, multi-theme content platform that discovers real estate listings, 
 The model mirrors what successful Facebook real estate pages already do manually: find compelling listings, write an engaging story around them, tease it on social, and drive traffic back to a site for the full content. This platform automates every step of that process and runs it across multiple themed channels simultaneously from a single command center dashboard.
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## The Business Model
 
@@ -74,6 +90,8 @@ The command center infrastructure itself becomes a sellable product — either a
 
 ---
 
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 ## Theme Model
 
 Each "theme" is an independent content channel with its own:
@@ -99,6 +117,8 @@ Each "theme" is an independent content channel with its own:
 *Each theme is the same pipeline with a different filter set and content template applied.*
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## Consumer Product Layer
 
@@ -145,6 +165,8 @@ Larger audience → better affiliate click volume → more affiliate revenue
 ```
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## System Architecture (Reference — Not Committed)
 
@@ -276,6 +298,8 @@ Investigate: Self-hosted options once scale justifies it
 
 ---
 
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 ## Automation Target
 
 **95% automated.** The human role in steady-state operation:
@@ -300,6 +324,8 @@ Everything else — discovery, generation, scheduling, publishing, email deliver
 At 5 themes: ~75 posts/day, ~30 reels/day across all platforms.
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## Rough Cost Model (Illustrative — Pre-Tool-Selection)
 
@@ -336,6 +362,8 @@ At 5 themes: ~75 posts/day, ~30 reels/day across all platforms.
 
 ---
 
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 ## Three Distinct Business Models
 
 This platform is not one business — it is three, each independently valuable:
@@ -358,6 +386,8 @@ The three businesses share the same infrastructure cost base and the same user a
 Each theme channel, once established with a proven audience and email list, is an independently sellable media asset. Niche content properties with monetized audiences typically sell for 24–36x monthly revenue. The platform infrastructure itself carries additional value as a licensable or white-label product.
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## Proof of Concept — Phase 0
 
@@ -941,6 +971,8 @@ Once the POC is profitable, revenue funds the full platform build — central co
 
 ---
 
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 ## Build Phases
 
 **Phase 1 — Foundation & Validate (Months 1–2)**
@@ -959,6 +991,8 @@ Consumer iOS/Android app launched — reads from the same database already live.
 Infrastructure mature enough to evaluate white-label or SaaS licensing. Revenue covering costs with meaningful margin. Asset value of individual themes assessable if any are candidates for sale.
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## Analytics Backend — Separate Service
 
@@ -1145,6 +1179,8 @@ The queue is the only coupling point between the two systems. If the analytics s
 
 ---
 
+<!-- HousesUnder150K real_estate_content_platform_concept -->
+
 ## Supplementary Free & Open APIs
 
 Beyond the core paid infrastructure, a layer of free public APIs can reduce costs and power specific features. These do not replace the core listing data feed but add significant value on top of it.
@@ -1178,6 +1214,8 @@ Offers MLS listings, property valuations, demographics, mapping, skip tracing, a
 Social media publishing automation, production-quality video generation, and the core MLS listing feed all remain paid layers. No viable free path exists for these at production quality and volume.
 
 ---
+
+<!-- HousesUnder150K real_estate_content_platform_concept -->
 
 ## Open Questions & Investigation Items
 

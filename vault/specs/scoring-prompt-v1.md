@@ -1,7 +1,21 @@
+---
+project: HousesUnder150K
+file: scoring_prompt_v1
+type: spec — prompt file for scoring pipeline Call 1 of 2
+last_updated: 2026-07-29
+---
+
+<!-- HousesUnder150K scoring_prompt_v1 -->
+
+# HousesUnder150K — Scoring Prompt v1.0
+
+This HousesUnder150K scoring prompt v1.0 is the archived prompt for the initial scoring pipeline (Call 1 of 2). The active prompt now lives in the codebase at `scripts/prompts/scoring-prompt.md`. This vault copy is retained for historical reference.
+
+<!-- HousesUnder150K scoring_prompt_v1 -->
+
 # HousesUnder150K — Scoring Prompt v1.0
 # Call 1 of 2 — runs on every listing fetched from Repliers
 # Output routes listing to publish tier or skip
-# Last updated: 2026-07-26
 
 ---
 
