@@ -395,9 +395,11 @@ def parse_int(raw) -> int:
         return 0
 
 
-def make_slug(city: str, price: int) -> str:
-    city_slug = re.sub(r"[^a-z0-9]+", "-", city.lower()).strip("-")
-    return f"{city_slug}-{price}"
+def make_slug(street: str, city: str, state: str) -> str:
+    def slugify(s: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", s.lower()).strip("-")
+    parts = [p for p in [slugify(street), slugify(city), state.lower()] if p]
+    return "-".join(parts)
 
 
 def make_price_display(price: int) -> str:
@@ -1157,7 +1159,7 @@ def write_webflow(
     state_full = addr.get("stateFull", state_abbr)
     address    = addr.get("formattedStreetLine", "")
     zip_code   = addr.get("zip", "")
-    slug       = make_slug(city, price)
+    slug       = make_slug(address, city, state_abbr)
     beds       = parse_int(details.get("numBedrooms"))
     baths      = parse_int(details.get("numBathrooms"))
     sqft       = parse_int(details.get("sqft"))
@@ -1304,7 +1306,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
     price      = parse_int(listing.get("listPrice", 0))
     city       = addr.get("city", "unknown")
     address_key = listing.get("mlsNumber", "unknown")  # address-based stable key
-    slug       = make_slug(city, price)
+    slug       = make_slug(addr.get("formattedStreetLine", ""), city, addr.get("state", ""))
     total_cost = 0.0
 
     log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) ---")
