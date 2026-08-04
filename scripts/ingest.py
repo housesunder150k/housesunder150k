@@ -224,108 +224,34 @@ CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=l
 
 CONTENT_PROMPT_TEMPLATE = """You looked at a house. Tell someone what you saw.
 
-You are not writing. You are not crafting. You are talking — the way you would if a friend asked what the place was like and you just got back from seeing it. No devices. No construction. No rhetoric. Just what was there.
+You are not writing. You are talking — the way you would if a friend asked what the place was like and you just got back from seeing it. Just what was there.
 
-The prohibitions below exist because writers reach for these patterns automatically. You are not writing. Read them, then forget you read them, and just talk.
+VOICE:
+- Vary sentence length. Short when the thought is short. Longer when it needs to be.
+- Use "you" where it fits naturally.
+- Start sentences with And or But when it fits.
+- No exclamation points.
+- No dashes of any kind — em, en, or hyphen used as a connector.
+- No performed enthusiasm.
 
-PROHIBITED CONSTRUCTIONS — each rule includes an example of the violation:
-
-No antithesis. Do not set up opposing ideas in balance.
-\u274c "It doesn't fight the age of the house, it works alongside it."
-
-No corrective negation. Do not establish what something isn't before saying what it is. This includes positive-framed versions.
-\u274c "This isn't a flipper special. It's a house someone actually lived in."
-\u274c "You don't find this in anything built recently."
-
-No paragraph pinning. Do not open a paragraph by restating what the previous paragraph just established.
-\u274c [Para 1 ends on the porch] [Para 2 opens: "That porch sets the tone for everything inside."]
-
-No parataxis. Do not stack short declarative sentences as a stylistic device.
-\u274c "Wood floors. Dark trim. A fireplace. 1908."
-
-No summary beats. Do not close a paragraph by summarizing what you just wrote.
-\u274c "...a pool, a garage, and a shed. For a house at this price, that's a lot of infrastructure."
-
-No rhetorical crutches. Do not use constructions that exist to create emphasis rather than convey information.
-\u274c "The wraparound porch alone is worth stopping for."
-
-No negative parallelisms. Do not pair a negative clause with a positive one for effect.
-\u274c "Layouts like this don't exist in new construction. You have to find them in houses like this."
-
-No negative anaphoras. Do not repeat a negative word or phrase to build rhythm.
-\u274c "No updates needed. No contractor required. No surprises waiting."
-
-No contrasting pairs. Do not juxtapose two things for rhetorical effect.
-\u274c "Small town, big lot."
-
-No rule of three. Do not list exactly three items for rhythmic effect.
-\u274c "A pool, a garage, and a wraparound porch."
-
-No em dashes, en dashes, or hyphens used as connectors in narrative or caption.
-\u274c "The kitchen works — updated island, new cabinetry — without fighting the house's age."
-
-No throat-clearing openers. Do not begin with a sentence that announces what you're about to say.
-\u274c "What makes this listing worth a look is the price relative to what you're getting."
-
-No landing sentences. Do not end a paragraph with a sentence that wraps up or editorializes on what you just described.
-\u274c "For a 116-year-old house in a small Ohio city, that's an unusual amount of infrastructure."
-
-No setup/payoff constructions. Do not build toward a reveal or conclusion.
-\u274c "The wraparound porch alone is worth stopping for. It runs the full front of the house."
-
-No parallel sentence structures within a paragraph. Do not let two or more consecutive sentences follow the same grammatical shape.
-\u274c "The kitchen has an oversized island. The dining room has a bay window. The great room has a fireplace."
-
-No stacked noun phrases. Do not pile nouns or noun phrases in sequence.
-\u274c "Wood floors, dark trim, ornate mantel, bay window, jetted tub."
-
-No filler intensifiers: genuinely, really, truly, actually.
-
-No corporate-register verbs: leverage, underscore, reflect, offer, feature, boast.
-
-No nominalization. Use the verb, not the noun made from it.
-\u274c "a replacement of the roof" \u2192 \u2705 "the roof was replaced"
-
-No hedging qualifiers. Say what it is.
-\u274c "The photos suggest the floors may be original hardwood."
-
-No performed enthusiasm. No exclamation points.
-\u274c "This one is special!"
-
-BANNED WORDS AND PHRASES:
-nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled
+BANNED WORDS: nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled, genuinely, really, truly, actually, leverage, underscore, reflect
 
 FACTS:
-- Every fact comes from the listing data provided. Never invent.
-- Specific numbers always. "6.13 acres" not "over six acres."
-- If the agent description is thin, work with what you have. Don't pad.
-- Name specific things: the town, the feature, the year work was done.
-- If the agent description is thin or omits specifics, say so plainly rather than inventing detail.
+- Every fact from the listing data only. Never invent.
+- Specific numbers always.
+- Name the town, the feature, the year work was done.
+- If the agent description is thin, say so plainly rather than padding.
 
-You have been given the following listing data:
-
-ADDRESS: {address}
-CITY: {city}
-STATE: {state_full}
-PRICE: ${price_display}
-BEDS: {bedrooms} | BATHS: {bathrooms} | SQFT: {sqft} | YEAR BUILT: {year_built}
-
-EDITORIAL CATEGORY: {category}
-KEY HOOKS: {key_hooks}
-
-AGENT DESCRIPTION (extract facts, rewrite completely, never quote or mirror the phrasing):
-{description}
-
-Produce exactly these four outputs, clearly labeled:
+The listing data will be provided in the user message. Produce exactly these four outputs, clearly labeled:
 
 ---
 
 HEADLINE
-Under 12 words. Lead with the most interesting fact — not the location, not the price. Price goes last after " — ". No periods between phrases. No real estate language. If year built is pre-1980, lead with it.
+Under 12 words. Lead with the most interesting fact. Price goes last after " — ". No real estate language. If year built is pre-1980, lead with it.
 Example: "1908 Alliance Bungalow with Pool, Porch, and Garage — $119,900"
 
 NARRATIVE
-300 to 400 words. No template. Let the property dictate the shape. Follow all prohibited constructions above.
+300 to 400 words. No template. Let the property dictate the shape.
 
 SOCIAL_CAPTION
 Under 60 words. Same voice. No dashes of any kind. Lead with the thing that stops the scroll.
@@ -336,6 +262,80 @@ One or two sentences, under 30 words. The single most interesting thing about th
 ---
 
 Return all four outputs with those exact labels. Nothing else."""
+
+
+REVIEW_PROMPT = """You are a copy editor. You have received four outputs from a writer describing a house listing: HEADLINE, NARRATIVE, SOCIAL_CAPTION, and SHORT_SUMMARY.
+
+Your job is to check each output against the rules below and rewrite any sentence that violates them. Do not rewrite sentences that are clean. Do not change facts, tone, or structure unless a rule requires it. Return all four outputs with the same labels whether or not changes were made.
+
+RULES:
+
+No dashes of any kind in NARRATIVE, SOCIAL_CAPTION, or SHORT_SUMMARY. Em dash, en dash, or hyphen used as a connector are all prohibited. Rewrite the sentence without the dash.
+\u274c "The kitchen works — updated island, new cabinetry — without fighting the house's age."
+\u2705 "The kitchen has an updated island and new cabinetry."
+
+No corrective negation. Do not establish what something isn't before saying what it is. Includes positive-framed versions.
+\u274c "This isn't a flipper special. It's a house someone actually lived in."
+\u274c "You don't find layouts like this in anything built recently."
+\u2705 State what it is directly.
+
+No antithesis. Do not balance opposing ideas for effect.
+\u274c "It doesn't fight the age of the house, it works alongside it."
+
+No summary beats. Do not close a paragraph by summarizing what you just wrote.
+\u274c "For a 116-year-old house in a small Ohio city, that's an unusual amount of infrastructure."
+
+No landing sentences. Do not end a paragraph with a sentence that editorializes on what you just described.
+\u274c "A hundred years is a long time without knowing the maintenance history."
+
+No setup/payoff. Do not build toward a reveal or conclusion.
+\u274c "The wraparound porch alone is worth stopping for. It runs the full front of the house."
+
+No rhetorical crutches. Do not use constructions that exist to create emphasis rather than convey information.
+\u274c "The wraparound porch alone is worth stopping for."
+
+No paragraph pinning. Do not open a paragraph by restating what the previous paragraph established.
+\u274c [Para 1 ends on the porch] [Para 2 opens: "That porch sets the tone for everything inside."]
+
+No parataxis. Do not stack short declarative sentences as a stylistic device.
+\u274c "Wood floors. Dark trim. A fireplace. 1908."
+
+No parallel sentence structures within a paragraph. Do not let two or more consecutive sentences follow the same grammatical shape.
+\u274c "The kitchen has an oversized island. The dining room has a bay window. The great room has a fireplace."
+
+No stacked noun phrases.
+\u274c "Wood floors, dark trim, ornate mantel, bay window, jetted tub."
+
+No rule of three. Do not list exactly three items for rhythmic effect.
+\u274c "A pool, a garage, and a wraparound porch."
+
+No contrasting pairs.
+\u274c "Small town, big lot."
+
+No negative parallelisms.
+\u274c "Layouts like this don't exist in new construction. You have to find them in houses like this."
+
+No negative anaphoras.
+\u274c "No updates needed. No contractor required. No surprises waiting."
+
+No throat-clearing openers.
+\u274c "What makes this listing worth a look is the price relative to what you're getting."
+
+No filler intensifiers: genuinely, really, truly, actually.
+
+No corporate-register verbs: leverage, underscore, reflect, offer, feature, boast.
+
+No nominalization. Use the verb, not the noun made from it.
+\u274c "a replacement of the roof" \u2192 \u2705 "the roof was replaced"
+
+No hedging qualifiers.
+\u274c "The photos suggest the floors may be original hardwood."
+
+No performed enthusiasm. No exclamation points.
+
+BANNED WORDS: nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled
+
+Return all four outputs with the exact same labels. Nothing else."""
 
 
 # ---------------------------------------------------------------------------
@@ -1057,27 +1057,38 @@ def score_listing(listing: dict) -> tuple[dict | None, float]:
 # Call 2 — Content generation
 # ---------------------------------------------------------------------------
 
-def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, float]:
+CLAUDE_MAX_TOKENS_REVIEW = 900
+
+
+def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, float, float]:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
-    prompt = CONTENT_PROMPT_TEMPLATE.format(
-        address=addr.get("formattedStreetLine", ""),
-        city=addr.get("city", ""),
-        state_full=addr.get("stateFull", addr.get("state", "")),
-        price_display=make_price_display(parse_int(listing.get("listPrice", 0))),
-        bedrooms=parse_int(details.get("numBedrooms")),
-        bathrooms=parse_int(details.get("numBathrooms")),
-        sqft=parse_int(details.get("sqft")),
-        year_built=parse_int(details.get("yearBuilt")),
-        category=score_data.get("CATEGORY", ""),
-        key_hooks=score_data.get("KEY_HOOKS", ""),
-        description=details.get("description", "") or "(no description)",
+    # Build dynamic listing data block as the user message — static instructions stay in system prompt for caching
+    listing_data = (
+        f"ADDRESS: {addr.get('formattedStreetLine', '')}\n"
+        f"CITY: {addr.get('city', '')}\n"
+        f"STATE: {addr.get('stateFull', addr.get('state', ''))}\n"
+        f"PRICE: ${make_price_display(parse_int(listing.get('listPrice', 0)))}\n"
+        f"BEDS: {parse_int(details.get('numBedrooms'))} | "
+        f"BATHS: {parse_int(details.get('numBathrooms'))} | "
+        f"SQFT: {parse_int(details.get('sqft'))} | "
+        f"YEAR BUILT: {parse_int(details.get('yearBuilt'))}\n"
+        f"EDITORIAL CATEGORY: {score_data.get('CATEGORY', '')}\n"
+        f"KEY HOOKS: {score_data.get('KEY_HOOKS', '')}\n\n"
+        f"AGENT DESCRIPTION (extract facts, rewrite completely, never quote or mirror the phrasing):\n"
+        f"{details.get('description', '') or '(no description)'}"
     )
-    raw, cost = call_claude("You are a real estate content writer.", prompt, "content_gen", max_tokens=CLAUDE_MAX_TOKENS_CONTENT)
+    raw, content_cost = call_claude(CONTENT_PROMPT_TEMPLATE, listing_data, "content_gen", max_tokens=CLAUDE_MAX_TOKENS_CONTENT)
     if not raw:
-        return None, cost
-    return parse_content_output(raw), cost
+        return None, content_cost, 0.0
+
+    reviewed_raw, review_cost = call_claude(REVIEW_PROMPT, raw, "review", max_tokens=CLAUDE_MAX_TOKENS_REVIEW)
+    if not reviewed_raw:
+        log.warning("[REVIEW] Review call failed — using raw content_gen output")
+        return parse_content_output(raw), content_cost, review_cost
+
+    return parse_content_output(reviewed_raw), content_cost, review_cost
 
 
 def parse_content_output(text: str) -> dict:
@@ -1379,8 +1390,8 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         log.info(f"Score {score} <= 5 — discarding {slug}")
         return "skipped_score", total_cost, False
 
-    content, content_cost = generate_content(listing, score_data)
-    total_cost += content_cost
+    content, content_cost, review_cost = generate_content(listing, score_data)
+    total_cost += content_cost + review_cost
     if not content:
         return "error", total_cost, False
     if not content.get("HEADLINE") or not content.get("NARRATIVE"):
