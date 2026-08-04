@@ -2,7 +2,7 @@
 project: HousesUnder150K
 file: open_questions
 type: unresolved decisions — move to _adr.md when resolved
-last_updated: 2026-07-29
+last_updated: 2026-08-04
 ---
 
 <!-- HousesUnder150K open_questions -->
@@ -41,10 +41,6 @@ Status: OPEN
 **OQ-004 — Session 7 Report Reconstruction**
 Status: OPEN
 Session 7 (states pages + SEO work) has no session report in `session_reports/`. A summary was reconstructed in `sessions/_session_log.md` from Session 8's vault gap note and live system evidence. Is a full reconstruction from Railway deployment history / Webflow activity worth the effort, or is the summary sufficient?
-
-**OQ-005 — Supabase RLS Remediation Plan**
-Status: OPEN
-RLS is disabled on all 3 Supabase tables. Service role key has full read/write access with no policies. When remediating: policies must be added before enabling RLS, or the pipeline loses its own access. What is the risk tolerance here given this is a single-operator pipeline? See `security/_security.md`.
 
 **OQ-006 — Dynamic OG Images**
 Status: OPEN — no current API path
@@ -103,3 +99,7 @@ Resolution: No. Tested on multiple element types (Section, DivBlock, raw DOM). A
 **OQ-C008 — Does the Webflow field-token syntax work in JSON-LD schema markup via API?**
 Status: CLOSED — Session 7
 Resolution: No. The token is accepted by the API but silently resolves to an empty string in JSON-LD context, producing malformed schema. Dangerous — do not use. Workaround: client-side JS reads already-rendered DOM values and injects correct JSON-LD at page load.
+
+**OQ-C009 — Supabase RLS Remediation Plan**
+Status: CLOSED — 2026-08-04
+Resolution: RLS enabled on all 4 Supabase tables (`published_listings`, `seen_listings`, `pipeline_runs`, and `social_queue`, added after this question was opened). Triggered by a Supabase security advisory email flagging `published_listings` as publicly exposed via the anon key. Verified via Railway env vars that the pipeline's `SUPABASE_KEY` is the service_role key, which bypasses RLS regardless of policy — so no policies were needed to preserve pipeline access. `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` applied to all four tables (migration `enable_rls_public_tables`), with Postgres's default deny-all covering the anon/authenticated roles. Verified safe via a live manual pipeline trigger post-fix: run completed with 0 errors, 1 listing published, and Supabase row counts confirmed the write landed. See `security/_security.md` for full detail.

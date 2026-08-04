@@ -123,4 +123,6 @@ Every decision is filtered through one question: does this listing give a reader
 
 Supabase RLS is currently disabled on all 3 tables (`published_listings`, `seen_listings`, `pipeline_runs`). The service role key has full read/write access. This is an open security gap. See `security/_security.md` for full context and remediation plan.
 
+**Update 2026-08-04:** RLS is now enabled on all 4 Supabase tables (`published_listings`, `seen_listings`, `pipeline_runs`, `social_queue`). The service_role key still has full read/write access (it bypasses RLS by design) — the anon/authenticated roles are now locked out. See `security/_security.md` for full detail. The line above is left as-is per this document's append-only rule.
+
 All credentials are in Railway environment variables. Never in code, never committed to the repo.

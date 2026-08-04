@@ -2,12 +2,21 @@
 project: HousesUnder150K
 file: session_log
 type: running session index — concise overview entries, newest at top
-last_updated: 2026-08-03
+last_updated: 2026-08-04
 ---
 
 <!-- HousesUnder150K session_log -->
 
 # HousesUnder150K Session Log
+
+## August 4, 2026 — Session 13: Supabase RLS Security Fix
+- Supabase security advisory email flagged RLS disabled on `published_listings` (public schema, exposed to the anon key). Scoped via `get_advisors`/`list_tables`: actually 4 tables affected, not the 1 named in the email (`published_listings`, `seen_listings`, `pipeline_runs`, `social_queue`).
+- Confirmed Railway's `SUPABASE_KEY` (shared by all 3 services — pipeline, newsletter, maintenance) is the service_role key, which bypasses RLS regardless of policy. Enabled RLS on all 4 tables with zero policies (migration `enable_rls_public_tables`) — Postgres's default deny-all locks out anon/authenticated without affecting the pipeline.
+- Verified safe two independent ways: a manual pipeline trigger (0 errors, 1 listing published, `published_listings` row count 128→129 confirmed in Supabase directly) and a live check of the published listing on housesunder150k.com.
+- Traced origin after user asked whether a prior agent had disabled RLS: it was never actively disabled — RLS was simply never enabled since table creation (2026-07-26). A prior session (2026-07-29) correctly flagged the gap as OQ-005 and left it open pending a risk-tolerance decision, until today's advisory email forced the fix.
+- OQ-005 closed (renumbered OQ-C009 in `open-questions/_open_questions.md`); `security/_security.md` and `rules/_rules.md` updated to reflect the resolution. Full detail in `session_reports/2026-08-04_session-13-supabase-rls-security-fix.md`.
+
+---
 
 ## August 3, 2026 — Content prompt overhaul
 - `CONTENT_PROMPT_TEMPLATE` in `ingest.py` rewritten. Explicit three-beat structure template removed. Voice rules replaced with prohibited constructions list, each with a concrete violation example: antithesis, corrective negation, paragraph pinning, parataxis, summary beats, rhetorical crutches, negative parallelisms, negative anaphoras, contrasting pairs, rule of three, landing sentences, setup/payoff, parallel sentence structures, stacked noun phrases, filler intensifiers, corporate-register verbs, nominalization, hedging qualifiers, performed enthusiasm.

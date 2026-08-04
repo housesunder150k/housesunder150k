@@ -2,7 +2,7 @@
 project: HousesUnder150K
 file: spec_pipeline
 type: living — update when ingest.py changes
-last_updated: 2026-08-03
+last_updated: 2026-08-04
 script: scripts/ingest.py
 ---
 
@@ -206,6 +206,30 @@ Applied before parsing SCORE, HEADLINE, NARRATIVE, etc. from both Claude respons
 ---
 
 <!-- HousesUnder150K spec_pipeline -->
+
+## HousesUnder150K Pipeline Spec — Planned Enhancement: Town Context
+
+Currently the content generation call has no reliable information about the town beyond what appears in the agent description. The model fabricates local knowledge when the listing data is thin, producing generic filler that could apply to any small American town.
+
+**Planned feature:** Add a web search call between scoring and content generation for all listings that score 6+. Search for practical town context and pass it as a `TOWN_CONTEXT` block in the content generation user message.
+
+**Target facts:**
+- Population and population trend (growing, shrinking, stable)
+- County and region of state
+- Nearest city of meaningful size and driving distance
+- What is actually in town (hospital, grocery store, school district)
+- Any economic context relevant to the decision to relocate
+
+**Why this matters:** No competing site produces this content. They all either ignore the town entirely or insert generic small-town filler. Practical town context is exactly what a buyer evaluating an unfamiliar market needs and cannot find elsewhere. It also produces unique, indexable content on every listing page that improves SEO.
+
+**Implementation notes:**
+- Fire only for listings scoring 6+ to control cost
+- Use Anthropic web search tool, not a separate API
+- Pass results as `TOWN_CONTEXT` in the dynamic user message block in `generate_content()`
+- If search returns no useful results, omit the block rather than padding
+- Do not include trivia or historical facts unless directly relevant to the relocation decision
+
+---
 
 ## HousesUnder150K Pipeline Spec — Environment Variables (ingest.py)
 

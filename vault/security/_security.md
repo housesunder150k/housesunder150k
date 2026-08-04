@@ -2,8 +2,8 @@
 project: HousesUnder150K
 file: security
 type: living — update as security posture is defined and implemented
-last_updated: 2026-07-29
-status: PLACEHOLDER — security plan not yet defined
+last_updated: 2026-08-04
+status: PLACEHOLDER — security plan not yet defined; RLS gap resolved 2026-08-04, other gaps below still open
 ---
 
 <!-- HousesUnder150K security -->
@@ -26,14 +26,18 @@ HousesUnder150K.com was built in approximately 2 days across Sessions 1-4, movin
 
 ## HousesUnder150K Security — Known Gaps
 
-### Supabase Row Level Security — UNRESOLVED
-RLS is **disabled** on all 3 Supabase tables (`published_listings`, `seen_listings`, `pipeline_runs`). The service role key stored in Railway has full read/write access with no policies restricting it.
+### Supabase Row Level Security — RESOLVED (2026-08-04)
+RLS is now **enabled** on all 4 Supabase tables (`published_listings`, `seen_listings`, `pipeline_runs`, `social_queue` — the fourth table was added after this gap was first logged). Previously disabled on all tables since creation and tracked as OQ-005; remediation was triggered by a Supabase security advisory email flagging `published_listings` as publicly exposed via the anon key (anyone with the project URL could read/edit/delete every row).
 
-**Risk:** If the Railway service role key is exposed, an attacker has unrestricted access to all pipeline data. This is not user data (no PII is stored), but it could allow manipulation of listing status, dedup records, or cost tracking.
+**Verification before the fix:** Confirmed via Railway env vars that `SUPABASE_KEY` (shared by the pipeline, newsletter, and maintenance services) is the `service_role` key, not the anon key. `service_role` bypasses RLS entirely regardless of policy, so enabling RLS with zero policies was sufficient — Postgres's default deny-all for an RLS-enabled table with no policies automatically locks out the `anon`/`authenticated` roles without affecting the pipeline's own access.
 
-**Remediation path:** Add appropriate RLS policies before enabling RLS, or the pipeline's own service role access breaks. Since this is a single-operator pipeline (not a multi-tenant app), the policy set is simple — service role bypasses RLS by default in Supabase, so enabling RLS with no policies would only affect non-service-role access. The actual fix may be as simple as: enable RLS (service role still has full access), add a read-only policy for the anon key if any future public queries are needed.
+**Fix applied:** `ALTER TABLE ... ENABLE ROW LEVEL SECURITY` on all 4 tables, migration `enable_rls_public_tables` (project `krzpkaxvbmpdeluqzkka`).
 
-**Priority:** Medium — no user PII at risk, but clean up before scaling.
+**Verification after the fix:** Manual pipeline trigger (Railway service `housesunder150k`, 2026-08-04 23:41 UTC) completed with 0 errors, 1 listing published, Webflow write succeeded, site republished to housesunder150k.com. `published_listings` row count confirmed incremented (128 → 129) and `pipeline_runs` logged the run cleanly, confirming service_role writes are unaffected by RLS.
+
+**Remaining:** No RLS policies exist beyond the default deny — none are needed today since the public site reads from Webflow CMS, not Supabase, directly. If a future feature needs the anon key to read Supabase directly, a read-only policy will need to be added then.
+
+**Priority:** Resolved. No user PII was ever at risk; this closed the externally-facing exposure before it was exploited.
 
 ---
 
@@ -82,7 +86,7 @@ When this plan is formally built out, it should address at minimum:
 
 1. **Credential inventory and rotation schedule** — all active API keys, when they were created, rotation cadence
 2. **MFA audit** — confirm MFA on every account listed above
-3. **Supabase RLS** — enable and add appropriate policies
+3. **Supabase RLS** — ✅ enabled 2026-08-04 (see above); no additional policies currently needed
 4. **Cloudflare security configuration** — WAF rules, bot fight mode, security level
 5. **GitHub security** — branch protection, secret scanning, dependency review
 6. **Webflow CSP** — Content Security Policy headers via Cloudflare (Webflow doesn't support custom headers natively)
@@ -98,3 +102,4 @@ When this plan is formally built out, it should address at minimum:
 - All credentials in Railway environment variables, never in code, never committed (from kickoff — followed throughout)
 - Maintenance service credentials set as variable references to main service, not duplicated raw values (ADR-043)
 - `REPLIERS_API_KEY` flagged for removal — unused since RealtyAPI pivot (OQ-010)
+- Supabase RLS enabled on all 4 tables 2026-08-04, closing OQ-005 (service_role key confirmed to bypass RLS, so no policies were required to preserve pipeline access)
