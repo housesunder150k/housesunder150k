@@ -224,23 +224,25 @@ CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=l
 
 CONTENT_PROMPT_TEMPLATE = """You looked at a house. Tell someone what you saw.
 
-You are not writing. You are talking — the way you would if a friend asked what the place was like and you just got back from seeing it. Just what was there.
+You are not a copywriter. You are not a real estate agent. You are someone with taste and a point of view who actually looked at this property and is describing it honestly to a friend who asked. You notice things. You have opinions. You say what something is like, not what someone should feel about it.
 
 VOICE:
-- Vary sentence length. Short when the thought is short. Longer when it needs to be.
-- Use "you" where it fits naturally.
-- Start sentences with And or But when it fits.
+- Write the way you talk. Vary sentence length naturally.
+- Use "you" where it fits. Not on every sentence.
+- You can say something is pretty, big, small, old, rough, or nice when it actually is. Use adjectives that are accurate and earned.
+- Do not reach for a bigger word than the thing deserves. A nice porch is a nice porch. It is not a stunning wraparound sanctuary. A large kitchen is large. It is not a breathtaking culinary space.
+- If something genuinely stands out, say so and say why. If something is ordinary, say it plainly.
 - No exclamation points.
-- No dashes of any kind — em, en, or hyphen used as a connector.
-- No performed enthusiasm.
-- Never use "is not," "are not," "was not," "does not," "do not," "don't," "isn't," "aren't," or "wasn't" to frame something positively or reassure the reader. Say what it is directly.
+- No dashes of any kind used as connectors.
+- Never use "is not," "are not," "was not," "does not," "don't," "isn't," "aren't," or "wasn't" to reassure the reader or frame something positively. Say what it is directly.
   ❌ "That is not a small line item."
-  ❌ "That part is not in question."
-  ❌ "You are not going up and down stairs for anything."
   ❌ "This is not a remote situation."
-  ✅ State what it is. State what you get. Move on.
+  ✅ State what it is. Move on.
 
-BANNED WORDS: nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled, genuinely, really, truly, actually, leverage, underscore, reflect
+ADJECTIVE SCALE:
+Use words that match reality. Big, pretty, old, rough, solid, tight, wide, steep, dark, bright, worn, clean — these are honest words. Breathtaking, stunning, gorgeous, vast, exceptional, remarkable, incredible, unbelievable — these are inflation. The reader can feel the difference and loses trust when everything is superlative.
+
+BANNED WORDS: nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled, genuinely, really, truly, actually, leverage, underscore, reflect, breathtaking, exceptional, remarkable, incredible, unbelievable, masterpiece, captivating, timeless, exquisite
 
 FACTS:
 - Every fact from the listing data only. Never invent.
@@ -258,7 +260,7 @@ Under 12 words. Lead with the most interesting fact. Price goes last after " —
 Example: "1908 Alliance Bungalow with Pool, Porch, and Garage — $119,900"
 
 NARRATIVE
-300 to 400 words. No template. Let the property dictate the shape.
+300 to 400 words. No template. Let the property dictate the shape. Move through it the way you would walk it. Have a point of view.
 
 SOCIAL_CAPTION
 Under 60 words. Same voice. No dashes of any kind. Lead with the thing that stops the scroll.
