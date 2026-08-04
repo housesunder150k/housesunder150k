@@ -241,6 +241,7 @@ FACTS:
 - Specific numbers always.
 - Name the town, the feature, the year work was done.
 - If the agent description is thin, say so plainly rather than padding.
+- The agent description is real estate marketing copy written to sell the property. Its tone, structure, and phrasing are examples of exactly what not to do. Extract facts from it only. Do not let its language influence how you write.
 
 The listing data will be provided in the user message. Produce exactly these four outputs, clearly labeled:
 
@@ -1060,7 +1061,7 @@ def score_listing(listing: dict) -> tuple[dict | None, float]:
 CLAUDE_MAX_TOKENS_REVIEW = 900
 
 
-def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, float, float]:
+def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, float]:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
@@ -1076,19 +1077,16 @@ def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, floa
         f"YEAR BUILT: {parse_int(details.get('yearBuilt'))}\n"
         f"EDITORIAL CATEGORY: {score_data.get('CATEGORY', '')}\n"
         f"KEY HOOKS: {score_data.get('KEY_HOOKS', '')}\n\n"
-        f"AGENT DESCRIPTION (extract facts, rewrite completely, never quote or mirror the phrasing):\n"
+        f"AGENT DESCRIPTION — this is real estate marketing copy written to sell the property. "
+        f"Its tone, structure, sentence patterns, and phrasing are examples of exactly what not to do. "
+        f"Extract facts only. Do not let any of it influence how you write:\n"
         f"{details.get('description', '') or '(no description)'}"
     )
     raw, content_cost = call_claude(CONTENT_PROMPT_TEMPLATE, listing_data, "content_gen", max_tokens=CLAUDE_MAX_TOKENS_CONTENT)
     if not raw:
-        return None, content_cost, 0.0
+        return None, content_cost
 
-    reviewed_raw, review_cost = call_claude(REVIEW_PROMPT, raw, "review", max_tokens=CLAUDE_MAX_TOKENS_REVIEW)
-    if not reviewed_raw:
-        log.warning("[REVIEW] Review call failed — using raw content_gen output")
-        return parse_content_output(raw), content_cost, review_cost
-
-    return parse_content_output(reviewed_raw), content_cost, review_cost
+    return parse_content_output(raw), content_cost
 
 
 def parse_content_output(text: str) -> dict:
@@ -1390,8 +1388,8 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         log.info(f"Score {score} <= 5 — discarding {slug}")
         return "skipped_score", total_cost, False
 
-    content, content_cost, review_cost = generate_content(listing, score_data)
-    total_cost += content_cost + review_cost
+    content, content_cost = generate_content(listing, score_data)
+    total_cost += content_cost
     if not content:
         return "error", total_cost, False
     if not content.get("HEADLINE") or not content.get("NARRATIVE"):
