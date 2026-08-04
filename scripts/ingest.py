@@ -233,6 +233,12 @@ VOICE:
 - No exclamation points.
 - No dashes of any kind — em, en, or hyphen used as a connector.
 - No performed enthusiasm.
+- Never use "is not," "are not," "was not," "does not," "do not," "don't," "isn't," "aren't," or "wasn't" to frame something positively or reassure the reader. Say what it is directly.
+  ❌ "That is not a small line item."
+  ❌ "That part is not in question."
+  ❌ "You are not going up and down stairs for anything."
+  ❌ "This is not a remote situation."
+  ✅ State what it is. State what you get. Move on.
 
 BANNED WORDS: nestled, charming, cozy, stunning, turnkey, move-in ready, open concept, perfect for, don't miss, rare find, won't last, priced to sell, boasts, features, sits on, offers, located in, versatile, endless possibilities, bones, good bones, opportunity, motivated seller, character-filled, genuinely, really, truly, actually, leverage, underscore, reflect
 
