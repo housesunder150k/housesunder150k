@@ -36,11 +36,17 @@ Sold price tracking (added 2026-08-17):
   A separate pass each run finds Sold listings where sold_price is known but
   has not yet been published to Webflow (sold_price_published = false). It
   appends a bold snippet to the narrative-body rich text field:
-    "Originally listed for $X and Sold for $Y on [date]."
+    "Originally listed for $X, this property sold for $Y on [date] after Z days on the market."
   On success, sold_price_published is set to true in Supabase.
 
   If no sold price is available within SOLD_PRICE_GIVE_UP_DAYS of
   status_marked_sold_at, sold_price_published is set to true to stop retrying.
+
+Days on market tracking (added 2026-08-17):
+  list_date is captured at ingest time and stored in Supabase. When a listing
+  sells, days_on_market is calculated as (sold_date - list_date).days and stored.
+  This value is included in the sold snippet on the listing page and will be
+  used for institutional buyer pattern analysis.
 
 CLOUDFLARE CLEANUP (added 2026-07-28):
 When a listing transitions to Pending/Sold/Expired, gallery images uploaded
@@ -53,7 +59,7 @@ Hero image is never deleted — it must remain for the listing page to render.
 import os
 import time
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, date as date_cls
 
 import requests
 
@@ -141,10 +147,11 @@ def db_fetch_sold_price_publish_queue() -> list[dict]:
 
     Also returns listings past the give-up threshold so the caller can mark
     them done without publishing (sold_price will be null for those).
+    Includes list_date for DOM calculation.
     """
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {
-        "select": "slug,webflow_item_id,price,sold_price,sold_date,status_marked_sold_at",
+        "select": "slug,webflow_item_id,price,sold_price,sold_date,status_marked_sold_at,list_date,days_on_market",
         "status": "eq.Sold",
         "sold_price_published": "eq.false",
         "order": "status_marked_sold_at.asc.nullsfirst",
@@ -192,15 +199,15 @@ def db_update_listing_status(
         log.error(f"Supabase update_listing_status error ({slug}): {e}")
 
 
-def db_mark_sold_price_published(slug: str) -> None:
-    """Set sold_price_published = true — either we wrote the snippet or gave up."""
+def db_mark_sold_price_published(slug: str, days_on_market: int | None = None) -> None:
+    """Set sold_price_published = true and optionally store days_on_market."""
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {"slug": f"eq.{slug}"}
+    payload: dict = {"sold_price_published": True}
+    if days_on_market is not None:
+        payload["days_on_market"] = days_on_market
     try:
-        r = requests.patch(
-            url, headers=_sb_headers(), params=params,
-            json={"sold_price_published": True}, timeout=10,
-        )
+        r = requests.patch(url, headers=_sb_headers(), params=params, json=payload, timeout=10)
         r.raise_for_status()
     except Exception as e:
         log.error(f"Supabase mark_sold_price_published error ({slug}): {e}")
@@ -367,16 +374,36 @@ def _format_price(price: int) -> str:
 def _format_sold_date(date_str: str) -> str:
     """Convert 'YYYY-MM-DD' to 'Month D, YYYY'. Falls back to raw string."""
     try:
-        from datetime import date as date_cls
         d = date_cls.fromisoformat(date_str)
         return d.strftime("%B %-d, %Y")
     except Exception:
         return date_str
 
 
-def patch_webflow_sold_snippet(item_id: str, slug: str, list_price: int, sold_price: int, sold_date: str) -> bool:
-    """Fetch the current narrative-body, append the sold snippet as a bold paragraph, and PATCH back."""
-    # Fetch current field data
+def _calculate_dom(list_date_str: str | None, sold_date_str: str | None) -> int | None:
+    """Calculate days on market from ISO date strings. Returns None if either date is missing."""
+    if not list_date_str or not sold_date_str:
+        return None
+    try:
+        listed = date_cls.fromisoformat(list_date_str)
+        sold = date_cls.fromisoformat(sold_date_str)
+        dom = (sold - listed).days
+        return dom if dom >= 0 else None
+    except Exception:
+        return None
+
+
+def patch_webflow_sold_snippet(
+    item_id: str, slug: str,
+    list_price: int, sold_price: int, sold_date: str,
+    days_on_market: int | None,
+) -> bool:
+    """Fetch the current narrative-body, append the sold snippet as a bold paragraph, and PATCH back.
+
+    Snippet format:
+    "Originally listed for $X, this property sold for $Y on [date] after Z days on the market."
+    DOM clause is omitted if days_on_market is None.
+    """
     try:
         r = requests.get(
             f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items/{item_id}",
@@ -394,9 +421,15 @@ def patch_webflow_sold_snippet(item_id: str, slug: str, list_price: int, sold_pr
     date_display  = _format_sold_date(sold_date)
     price_display = _format_price(list_price)
     sold_display  = _format_price(sold_price)
+
+    if days_on_market is not None:
+        dom_clause = f" after {days_on_market} days on the market"
+    else:
+        dom_clause = ""
+
     snippet = (
-        f'<p><strong>Originally listed for {price_display} and '
-        f'Sold for {sold_display} on {date_display}.</strong></p>'
+        f'<p><strong>Originally listed for {price_display}, this property sold for '
+        f'{sold_display} on {date_display}{dom_clause}.</strong></p>'
     )
 
     # Guard: don't append twice if somehow called again
@@ -414,7 +447,7 @@ def patch_webflow_sold_snippet(item_id: str, slug: str, list_price: int, sold_pr
             timeout=30,
         )
         r.raise_for_status()
-        log.info(f"[{slug}] sold snippet appended to narrative-body")
+        log.info(f"[{slug}] sold snippet appended to narrative-body (DOM: {days_on_market})")
         return True
     except requests.RequestException as e:
         log.error(f"[{slug}] Webflow snippet PATCH failed: {e}")
@@ -488,7 +521,6 @@ def run_status_sweep() -> tuple[list[str], dict]:
             counts["unchanged"] += 1
             continue
 
-        # Active -> Active is handled above; anything else is a real transition
         log.info(f"[{slug}] status change: {current_status} -> {new_status}")
 
         if not patch_webflow_status(webflow_item_id, new_status):
@@ -508,14 +540,12 @@ def run_status_sweep() -> tuple[list[str], dict]:
             else:
                 log.warning(f"[{slug}] Some gallery deletions failed — gallery_image_ids NOT cleared")
 
-        # Build kwargs for status update
         update_kwargs: dict = dict(
             new_status=new_status,
             checked_at=checked_at,
             clear_gallery_ids=clear_gallery,
         )
 
-        # Capture sold price if transitioning to Sold
         if new_status == "Sold":
             update_kwargs["mark_sold_at"] = checked_at
             if sold_price:
@@ -537,6 +567,7 @@ def run_status_sweep() -> tuple[list[str], dict]:
 
 def run_sold_snippet_pass() -> list[str]:
     """For Sold listings with a known sold_price not yet published, append snippet to Webflow.
+    Calculates days_on_market from list_date and sold_date when available.
     Also handles the give-up case and re-checks for late-arriving prices.
     Returns list of item_ids that were updated (need publishing)."""
 
@@ -553,6 +584,7 @@ def run_sold_snippet_pass() -> list[str]:
         list_price      = row.get("price") or 0
         sold_price      = row.get("sold_price")
         sold_date       = row.get("sold_date")
+        list_date       = row.get("list_date")
         marked_sold_raw = row.get("status_marked_sold_at")
 
         # Parse marked_sold_at for give-up check
@@ -563,11 +595,12 @@ def run_sold_snippet_pass() -> list[str]:
             except Exception:
                 pass
 
-        # Case 1: sold price is known — append snippet
+        # Case 1: sold price is known — calculate DOM and append snippet
         if sold_price and sold_date:
-            ok = patch_webflow_sold_snippet(webflow_item_id, slug, list_price, sold_price, sold_date)
+            dom = _calculate_dom(list_date, sold_date)
+            ok = patch_webflow_sold_snippet(webflow_item_id, slug, list_price, sold_price, sold_date, dom)
             if ok:
-                db_mark_sold_price_published(slug)
+                db_mark_sold_price_published(slug, days_on_market=dom)
                 snippet_item_ids.append(webflow_item_id)
             else:
                 log.warning(f"[{slug}] snippet patch failed — will retry next run")
@@ -582,9 +615,10 @@ def run_sold_snippet_pass() -> list[str]:
             if fetched_price:
                 log.info(f"[{slug}] sold price now available: {fetched_price} on {fetched_date}")
                 db_update_sold_price(slug, fetched_price, fetched_date)
-                ok = patch_webflow_sold_snippet(webflow_item_id, slug, list_price, fetched_price, fetched_date)
+                dom = _calculate_dom(list_date, fetched_date)
+                ok = patch_webflow_sold_snippet(webflow_item_id, slug, list_price, fetched_price, fetched_date, dom)
                 if ok:
-                    db_mark_sold_price_published(slug)
+                    db_mark_sold_price_published(slug, days_on_market=dom)
                     snippet_item_ids.append(webflow_item_id)
                 else:
                     log.warning(f"[{slug}] snippet patch failed after price fetch — will retry next run")

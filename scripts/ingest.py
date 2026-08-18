@@ -19,6 +19,10 @@ Changes (2026-07-29):
 - Tags field added: up to 5 tags derived from CATEGORY, KEY_HOOKS, and listing data.
   No extra Claude call — tags generated in generate_tags() from existing scored data.
   Written to new Webflow "tags" PlainText field as comma-separated string.
+
+Changes (2026-08-17):
+- list_date captured from RealtyAPI search result and stored in Supabase at ingest time.
+  Used by maintenance job to calculate days_on_market when a listing sells.
 """
 
 import os
@@ -489,6 +493,19 @@ def make_address_key(street: str, city: str, state: str) -> str:
     return f"{street.strip().lower()}|{city.strip().lower()}|{state.strip().lower()}"
 
 
+def parse_list_date(raw: str | None) -> str | None:
+    """Extract ISO date string (YYYY-MM-DD) from RealtyAPI list_date field.
+    RealtyAPI returns list_date as ISO 8601 datetime e.g. '2026-06-23T00:08:11Z'.
+    Returns None if not parseable.
+    """
+    if not raw:
+        return None
+    try:
+        return raw[:10]  # slice YYYY-MM-DD from datetime string
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Supabase
 # ---------------------------------------------------------------------------
@@ -557,17 +574,13 @@ def db_batch_seen_recently(address_keys: list[str]) -> set[str]:
         return set()
     cutoff = (datetime.now(timezone.utc) - timedelta(days=SEEN_SUPPRESSION_DAYS)).isoformat()
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
-    # address keys contain pipe characters — use POST with body to avoid URL encoding issues
     params = {
         "select": "mls_number",
         "last_seen_at": f"gte.{cutoff}",
     }
     headers = _sb_headers()
     headers["Prefer"] = "return=representation"
-    # Use individual IN filter — Supabase REST handles comma-separated values
-    # Pipe chars in keys need special handling: query one at a time if batch fails
     try:
-        # Build filter manually to handle pipe chars safely
         quoted = ",".join(f'"{k}"' for k in address_keys)
         params["mls_number"] = f"in.({quoted})"
         r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
@@ -602,6 +615,7 @@ def db_insert_published(
     hero_image_url: str, today_ct: date, price: int = 0,
     is_deal_of_day: bool = False,
     gallery_image_ids: list[str] | None = None,
+    list_date: str | None = None,
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
@@ -613,6 +627,7 @@ def db_insert_published(
         "price": price,
         "is_deal_of_day": is_deal_of_day,
         "gallery_image_ids": gallery_image_ids or [],
+        "list_date": list_date,
     }
     try:
         r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
@@ -799,7 +814,9 @@ def normalize_listing(result: dict, description: str) -> dict | None:
     lot_acres = round(lot_sqft / 43560, 2) if lot_sqft else None
     year_built = 0
     listing_href = result.get("href", "")
-    dom = 0
+
+    # Capture list_date from RealtyAPI — stored in Supabase for DOM calculation at sale
+    list_date = parse_list_date(result.get("list_date"))
 
     photos = []
     primary = result.get("primary_photo", "")
@@ -825,7 +842,7 @@ def normalize_listing(result: dict, description: str) -> dict | None:
         "listingId": listing_id,
         "listingHref": listing_href,
         "listPrice": list_price,
-        "daysOnMarket": dom,
+        "listDate": list_date,      # ISO date string YYYY-MM-DD or None
         "address": {
             "formattedStreetLine": street,
             "city": city,
@@ -980,7 +997,6 @@ def build_scoring_input(listing: dict) -> str:
     baths      = parse_int(details.get("numBathrooms"))
     sqft       = parse_int(details.get("sqft"))
     year       = parse_int(details.get("yearBuilt"))
-    dom        = parse_int(listing.get("daysOnMarket"))
     lot_acres  = details.get("lotAcres")
     if lot_acres and beds <= 2 and sqft < 900:
         lot_acres = None
@@ -997,7 +1013,6 @@ BEDROOMS: {beds}
 BATHROOMS: {baths}
 SQFT: {sqft}
 YEAR_BUILT: {year}
-DAYS_ON_MARKET: {dom}
 ACREAGE: {acreage}
 POOL: {pool}
 WATERFRONT: {waterfront}
@@ -1080,7 +1095,6 @@ def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, floa
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
-    # Build dynamic listing data block as the user message — static instructions stay in system prompt for caching
     listing_data = (
         f"ADDRESS: {addr.get('formattedStreetLine', '')}\n"
         f"CITY: {addr.get('city', '')}\n"
@@ -1370,8 +1384,9 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
     addr       = listing.get("address", {})
     price      = parse_int(listing.get("listPrice", 0))
     city       = addr.get("city", "unknown")
-    address_key = listing.get("mlsNumber", "unknown")  # address-based stable key
+    address_key = listing.get("mlsNumber", "unknown")
     slug       = make_slug(addr.get("formattedStreetLine", ""), city, addr.get("state", ""))
+    list_date  = listing.get("listDate")
     total_cost = 0.0
 
     log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) ---")
@@ -1444,9 +1459,10 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         today_ct=today_ct, price=price,
         is_deal_of_day=is_hero,
         gallery_image_ids=gallery_image_ids,
+        list_date=list_date,
     )
 
-    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, gallery_photos={len(gallery_image_ids)})")
+    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, gallery_photos={len(gallery_image_ids)}, list_date={list_date})")
     return "published", total_cost, is_hero
 
 
