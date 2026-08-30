@@ -33,6 +33,7 @@ Dry run:
 Environment variables required:
   BUFFER_API_KEY                — Buffer API key (from publish.buffer.com/settings/api)
   BUFFER_PINTEREST_CHANNEL_ID   — Buffer Pinterest channel ID for Jordan Reyes
+  PINTEREST_BOARD_ID            — Buffer board ID for 'Houses Under $150,000' board
   ANTHROPIC_API_KEY             — for pin description generation
   SUPABASE_URL                  — HousesUnder150K Supabase project URL
   SUPABASE_KEY                  — Supabase service role key
@@ -68,7 +69,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BUFFER_API_KEY              = os.environ["BUFFER_API_KEY"]
-BUFFER_CHANNEL_ID           = os.environ["BUFFER_PINTEREST_CHANNEL_ID"]   # 6a94a22b065799be4657c00e
+BUFFER_CHANNEL_ID           = os.environ["BUFFER_PINTEREST_CHANNEL_ID"]   # 6a94aba7065799be46582df3
 ANTHROPIC_API_KEY           = os.environ["ANTHROPIC_API_KEY"]
 SUPABASE_URL                = os.environ["SUPABASE_URL"]
 SUPABASE_KEY                = os.environ["SUPABASE_KEY"]
@@ -79,7 +80,10 @@ SITE_BASE_URL               = "https://housesunder150k.com"
 BUFFER_API_URL              = "https://api.buffer.com"
 
 CLAUDE_MODEL      = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS = 400
+CLAUDE_MAX_TOKENS = 300  # Pinterest 500 char limit minus URL (~65) and newlines
+
+PINTEREST_BOARD_ID  = os.environ["PINTEREST_BOARD_ID"]   # Buffer board ID for 'Houses Under $150,000'
+PIN_DESCRIPTION_MAX = 420  # chars — leaves room for \n\n + URL within 500 char limit
 
 CT_TZ = pytz.timezone("America/Chicago")
 
@@ -242,6 +246,20 @@ def call_claude(system: str, user: str) -> str | None:
         return None
 
 
+def truncate_to_sentence(text: str, max_chars: int) -> str:
+    """Truncate text to max_chars on a sentence boundary ('. ', '! ', '? ')."""
+    if len(text) <= max_chars:
+        return text
+    truncated = text[:max_chars]
+    for sep in ('. ', '! ', '? '):
+        idx = truncated.rfind(sep)
+        if idx != -1:
+            return truncated[:idx + 1]
+    # No sentence boundary found — hard truncate at last space
+    idx = truncated.rfind(' ')
+    return truncated[:idx] if idx != -1 else truncated
+
+
 def parse_city_state_from_slug(slug: str) -> tuple[str, str]:
     """
     Slugs are formatted as: address-city-state e.g. '33110-w-main-st-piedmont-oh'
@@ -329,6 +347,11 @@ def schedule_pin(pin_text: str, image_url: str, link_url: str, due_at_utc: datet
             "assets": [
                 {"image": {"url": image_url}}
             ],
+            "metadata": {
+                "pinterest": {
+                    "boardId": PINTEREST_BOARD_ID,
+                }
+            },
         }
     }
 
@@ -421,9 +444,10 @@ def run(dry_run: bool = False, force_monday: bool = False):
 
     due_at_utc = random_post_time_utc()
 
-    # Append link to pin description — Buffer's PinterestPostMetadataInput.url
-    # is accepted but silently dropped (known Buffer API bug). Link in body is
-    # the only reliable way to include a destination URL.
+    # Truncate to sentence boundary, then append link.
+    # Pinterest hard limit is 500 chars. Buffer's PinterestPostMetadataInput.url
+    # is accepted but silently dropped (known Buffer API bug) so link goes in body.
+    pin_text = truncate_to_sentence(pin_text, PIN_DESCRIPTION_MAX)
     full_pin_text = f"{pin_text}\n\n{link_url}"
 
     print("\n" + "=" * 60)
