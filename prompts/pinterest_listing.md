@@ -31,10 +31,8 @@ FORMAT: Plain text only. No markdown. No bullet points.
 
 INPUT you will receive:
 - HEADLINE: the listing page headline
-- SHORT_SUMMARY: one or two sentence teaser
-- SOCIAL_CAPTION: the site's caption (do NOT reproduce verbatim)
 - PRICE: formatted price
-- CITY / STATE: location
-- CATEGORY: editorial category (WATERFRONT, HISTORIC, ACREAGE, etc.)
+- CITY / STATE: location (parsed from slug — city may be a small town name)
+- CATEGORY: editorial category (WATERFRONT, HISTORIC, ACREAGE, HIDDEN_GEM, etc.)
 
 OUTPUT: The pin description text only. Nothing else.

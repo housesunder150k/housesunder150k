@@ -145,7 +145,7 @@ def get_deal_of_the_day() -> dict | None:
     today = get_now_ct().date().isoformat()
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     params = {
-        "select": "slug,headline,short_summary,social_caption,price,city,state,category,hero_image_url",
+        "select": "slug,headline,price,category,hero_image_url",
         "is_deal_of_day": "eq.true",
         "published_date_ct": f"eq.{today}",
         "limit": 1,
@@ -242,15 +242,30 @@ def call_claude(system: str, user: str) -> str | None:
         return None
 
 
+def parse_city_state_from_slug(slug: str) -> tuple[str, str]:
+    """
+    Slugs are formatted as: address-city-state e.g. '33110-w-main-st-piedmont-oh'
+    Last part is 2-letter state abbreviation, second-to-last is city.
+    Returns (city, state) as title-cased strings.
+    """
+    parts = slug.split("-")
+    if len(parts) >= 2:
+        state = parts[-1].upper()
+        city = parts[-2].title()
+    else:
+        state = ""
+        city = ""
+    return city, state
+
+
 def generate_listing_pin(listing: dict) -> str | None:
     system = load_prompt("pinterest_listing.md")
+    city, state = parse_city_state_from_slug(listing.get("slug", ""))
     user = (
         f"HEADLINE: {listing.get('headline', '')}\n"
-        f"SHORT_SUMMARY: {listing.get('short_summary', '')}\n"
-        f"SOCIAL_CAPTION: {listing.get('social_caption', '')}\n"
         f"PRICE: ${listing.get('price', 0):,}\n"
-        f"CITY: {listing.get('city', '')}\n"
-        f"STATE: {listing.get('state', '')}\n"
+        f"CITY: {city}\n"
+        f"STATE: {state}\n"
         f"CATEGORY: {listing.get('category', '')}\n"
     )
     return call_claude(system, user)
