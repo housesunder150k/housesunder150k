@@ -349,7 +349,7 @@ def schedule_pin(pin_text: str, image_url: str, link_url: str, due_at_utc: datet
             ],
             "metadata": {
                 "pinterest": {
-                    "boardId": PINTEREST_BOARD_ID,
+                    "boardServiceId": PINTEREST_BOARD_ID,
                 }
             },
         }
