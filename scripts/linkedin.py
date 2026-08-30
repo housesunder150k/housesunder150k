@@ -301,7 +301,7 @@ def schedule_post(post_text: str, link_url: str, due_at_utc: datetime) -> str | 
             "dueAt": due_at_iso,
             "metadata": {
                 "linkedin": {
-                    "comment": comment_text,
+                    "firstComment": comment_text,
                 }
             },
         }
