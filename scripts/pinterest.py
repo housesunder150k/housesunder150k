@@ -326,10 +326,9 @@ def schedule_pin(pin_text: str, image_url: str, link_url: str, due_at_utc: datet
             "schedulingType": "automatic",
             "mode": "customScheduled",
             "dueAt": due_at_iso,
-            "media": {
-                "picture": image_url,
-                "link": link_url,
-            },
+            "assets": [
+                {"image": {"url": image_url}}
+            ],
         }
     }
 
@@ -422,9 +421,14 @@ def run(dry_run: bool = False, force_monday: bool = False):
 
     due_at_utc = random_post_time_utc()
 
+    # Append link to pin description — Buffer's PinterestPostMetadataInput.url
+    # is accepted but silently dropped (known Buffer API bug). Link in body is
+    # the only reliable way to include a destination URL.
+    full_pin_text = f"{pin_text}\n\n{link_url}"
+
     print("\n" + "=" * 60)
     print("PIN DESCRIPTION:")
-    print(pin_text)
+    print(full_pin_text)
     print(f"\nIMAGE URL: {image_url}")
     print(f"LINK URL:  {link_url}")
     print(f"\nSCHEDULED FOR: {due_at_utc.strftime('%Y-%m-%d %H:%M UTC')}")
@@ -434,7 +438,7 @@ def run(dry_run: bool = False, force_monday: bool = False):
         log.info("=== DRY RUN complete — no pin sent ===")
         return
 
-    post_id = schedule_pin(pin_text, image_url, link_url, due_at_utc)
+    post_id = schedule_pin(full_pin_text, image_url, link_url, due_at_utc)
     if not post_id:
         log.error("Failed to schedule pin — aborting")
         return
