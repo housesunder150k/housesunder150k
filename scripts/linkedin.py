@@ -180,8 +180,10 @@ def get_latest_article() -> dict | None:
         if not items:
             log.warning("No articles found in Webflow CMS")
             return None
-        fd = items[0].get("fieldData", {})
-        article_url_path = fd.get("article-url", "")
+        item = items[0]
+        fd = item.get("fieldData", {})
+        slug = item.get("slug") or fd.get("slug", "")
+        article_url_path = fd.get("article-url") or (f"/articles/{slug}" if slug else "")
         result = {
             "name": fd.get("name", ""),
             "excerpt": fd.get("excerpt", ""),
