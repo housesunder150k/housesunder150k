@@ -23,6 +23,14 @@ Changes (2026-07-29):
 Changes (2026-08-17):
 - list_date captured from RealtyAPI search result and stored in Supabase at ingest time.
   Used by maintenance job to calculate days_on_market when a listing sells.
+
+Changes (2026-08-29):
+- Image alt text overhauled to target GSC impression queries.
+  New make_image_alt() generates varied keyword patterns matching real search queries:
+  "[city] [state] house under 150000", "affordable home under 150K [city] [state]", etc.
+  City is always present in every template — no state-only patterns.
+  Hero and all gallery images use GSC-aligned alt text instead of listing headline
+  or slug-based placeholder. Deterministic per slug+photo_index — stable across deploys.
 """
 
 import os
@@ -504,6 +512,77 @@ def parse_list_date(raw: str | None) -> str | None:
         return raw[:10]  # slice YYYY-MM-DD from datetime string
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Image alt text — GSC-aligned keyword variations
+# ---------------------------------------------------------------------------
+
+# Template slots — mixed to maximize variation across images on the same page.
+# All variations mirror real GSC impression queries: "[city] [state] house under 150000",
+# "[city] [state] home under 150K", "affordable housing [city] [state]", etc.
+# City is always present in every template — no state-only patterns.
+# photo_index 0 = hero, 1-3 = gallery photos.
+
+_ALT_PRICE_FORMATS = ["under 150K", "under 150,000", "under $150,000", "under 150000"]
+_ALT_NOUNS = ["house", "home", "property", "housing"]
+_ALT_MODIFIERS = ["affordable", "budget", "cheap", ""]  # "" = no modifier
+
+# 16 deterministic templates — city present in every one.
+# Slug hash selects entry; photo_index offsets within pool so all four images
+# on one page get different patterns.
+_ALT_TEMPLATES = [
+    "{modifier} {noun} {price} in {city} {state}",
+    "{city} {state} {noun} {price}",
+    "{price} {noun} in {city} {state}",
+    "{modifier} {noun} in {city} {state} {price}",
+    "{state} {noun} {price} {city}",
+    "{modifier} {city} {state} {noun} {price}",
+    "{price} {modifier} {noun} {city} {state}",
+    "{city} {state} {modifier} {noun} {price}",
+    "{modifier} {noun} {price} {city} {state}",
+    "{city} {state} {price} {noun}",
+    "{noun} {price} in {city} {state}",
+    "{modifier} {price} {noun} {city} {state}",
+    "{city} {noun} {price} {state}",
+    "{price} {noun} {modifier} {city} {state}",
+    "{modifier} housing {price} {city} {state}",
+    "{city} {state} {modifier} housing {price}",
+]
+
+
+def make_image_alt(city: str, state_full: str, photo_index: int, slug: str) -> str:
+    """Return a GSC-keyword-aligned alt text string for a listing image.
+
+    photo_index: 0 = hero, 1 = gallery photo 2, 2 = gallery photo 3, 3 = gallery photo 4.
+    Uses slug hash for deterministic but varied selection — same listing always
+    gets the same alt texts across deploys, different listings get different patterns.
+    City is always present — no state-only patterns.
+    """
+    # Derive a stable base offset from the slug so each listing cycles differently
+    slug_hash = sum(ord(c) for c in slug)
+
+    template_idx = (slug_hash + photo_index * 3) % len(_ALT_TEMPLATES)
+    price_idx    = (slug_hash + photo_index * 5) % len(_ALT_PRICE_FORMATS)
+    noun_idx     = (slug_hash + photo_index * 7) % len(_ALT_NOUNS)
+    modifier_idx = (slug_hash + photo_index * 11) % len(_ALT_MODIFIERS)
+
+    template = _ALT_TEMPLATES[template_idx]
+    price    = _ALT_PRICE_FORMATS[price_idx]
+    noun     = _ALT_NOUNS[noun_idx]
+    modifier = _ALT_MODIFIERS[modifier_idx]
+
+    alt = template.format(
+        modifier=modifier,
+        noun=noun,
+        price=price,
+        city=city,
+        state=state_full,
+    )
+
+    # Clean up double spaces left by empty modifier slot
+    alt = " ".join(alt.split())
+    return alt.strip()
 
 
 # ---------------------------------------------------------------------------
@@ -1200,7 +1279,9 @@ def upload_image(image_url: str, slug: str) -> tuple[str | None, str | None]:
     return delivery_url, image_id
 
 
-def upload_gallery_images(images: list[str], slug: str) -> tuple[list[dict], list[str]]:
+def upload_gallery_images(
+    images: list[str], slug: str, city: str, state_full: str
+) -> tuple[list[dict], list[str]]:
     """Upload up to GALLERY_PHOTO_COUNT photos (indices 1 onward, skipping hero at index 0)."""
     gallery_field_data = []
     gallery_image_ids = []
@@ -1210,9 +1291,11 @@ def upload_gallery_images(images: list[str], slug: str) -> tuple[list[dict], lis
     for i, photo_url in enumerate(candidates):
         delivery_url, image_id = upload_image(photo_url, f"{slug}-gallery-{i + 1}")
         if delivery_url and image_id:
-            gallery_field_data.append({"url": delivery_url, "alt": f"{slug} photo {i + 2}"})
+            # photo_index 1-3 for gallery (0 is reserved for hero)
+            alt = make_image_alt(city, state_full, i + 1, slug)
+            gallery_field_data.append({"url": delivery_url, "alt": alt})
             gallery_image_ids.append(image_id)
-            log.info(f"Gallery photo {i + 1}/{len(candidates)} uploaded: {image_id}")
+            log.info(f"Gallery photo {i + 1}/{len(candidates)} uploaded: {image_id} | alt: {alt}")
         else:
             log.warning(f"Gallery photo {i + 1}/{len(candidates)} failed — skipping")
 
@@ -1247,6 +1330,9 @@ def write_webflow(
     headline    = content.get("HEADLINE", "")
     name        = headline if headline else f"{city}, {state_full} — ${make_price_display(price)}"
 
+    # Hero image uses photo_index 0 — gets a GSC-aligned alt pattern distinct from gallery images
+    hero_alt = make_image_alt(city, state_full, 0, slug)
+
     field_data = {
         "name":             name,
         "slug":             slug,
@@ -1261,7 +1347,7 @@ def write_webflow(
         "bedrooms":         beds,
         "bathrooms":        baths,
         "square-feet":      sqft,
-        "hero-image":       {"url": hero_image_url, "alt": name},
+        "hero-image":       {"url": hero_image_url, "alt": hero_alt},
         "narrative-body":   format_richtext(content.get("NARRATIVE", "")),
         "short-summary":    content.get("SHORT_SUMMARY", ""),
         "listing-url":      f"https://housesunder150k.com/listings/{slug}",
@@ -1282,7 +1368,7 @@ def write_webflow(
         "accept": "application/json",
     }
 
-    log.info(f"Writing to Webflow: {name}")
+    log.info(f"Writing to Webflow: {name} | hero_alt: {hero_alt}")
     try:
         r = requests.post(
             f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items",
@@ -1384,6 +1470,7 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
     addr       = listing.get("address", {})
     price      = parse_int(listing.get("listPrice", 0))
     city       = addr.get("city", "unknown")
+    state_full = addr.get("stateFull", addr.get("state", ""))
     address_key = listing.get("mlsNumber", "unknown")
     slug       = make_slug(addr.get("formattedStreetLine", ""), city, addr.get("state", ""))
     list_date  = listing.get("listDate")
@@ -1433,7 +1520,10 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         log.warning(f"No hero image for {slug}")
         hero_image_url = ""
 
-    gallery_field_data, gallery_image_ids = upload_gallery_images(images, slug) if len(images) > 1 else ([], [])
+    gallery_field_data, gallery_image_ids = (
+        upload_gallery_images(images, slug, city, state_full)
+        if len(images) > 1 else ([], [])
+    )
 
     claude_wants_hero = score_data.get("DEAL_OF_DAY_CANDIDATE", "NO").upper() == "YES"
     is_hero = claude_wants_hero and dod_available
