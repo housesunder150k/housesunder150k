@@ -265,15 +265,13 @@ def _buffer_headers() -> dict:
     }
 
 
-def schedule_post(post_text: str, link_url: str, due_at_utc: datetime) -> str | None:
+def schedule_post(post_text: str, due_at_utc: datetime) -> str | None:
     """
-    Schedule a LinkedIn post with the link in the first comment.
-    Buffer LinkedIn metadata supports a 'comment' field for the first comment.
+    Schedule a LinkedIn post via Buffer. Link is included in post_text body.
     due_at_utc must be a UTC-aware datetime.
     Returns the Buffer post ID on success.
     """
     due_at_iso = due_at_utc.strftime("%Y-%m-%dT%H:%M:%S.000Z")
-    comment_text = f"Full listing: {link_url}"
 
     mutation = """
     mutation CreatePost($input: CreatePostInput!) {
@@ -299,11 +297,6 @@ def schedule_post(post_text: str, link_url: str, due_at_utc: datetime) -> str | 
             "schedulingType": "automatic",
             "mode": "customScheduled",
             "dueAt": due_at_iso,
-            "metadata": {
-                "linkedin": {
-                    "firstComment": comment_text,
-                }
-            },
         }
     }
 
@@ -385,13 +378,15 @@ def run(dry_run: bool = False, force_monday: bool = False):
             return
         log.info(f"Listing post generated ({len(post_text)} chars)")
 
+    # Append link to post body — LinkedIn nofollow means first comment
+    # provides no SEO benefit over body; presence/entity signals are the goal.
+    full_post_text = f"{post_text}\n\n{link_url}"
+
     due_at_utc = random_post_time_utc()
 
     print("\n" + "=" * 60)
     print("POST BODY:")
-    print(post_text)
-    print("\nFIRST COMMENT:")
-    print(f"Full listing: {link_url}")
+    print(full_post_text)
     print(f"\nSCHEDULED FOR: {due_at_utc.strftime('%Y-%m-%d %H:%M UTC')}")
     print("=" * 60 + "\n")
 
@@ -399,7 +394,7 @@ def run(dry_run: bool = False, force_monday: bool = False):
         log.info("=== DRY RUN complete — no post sent ===")
         return
 
-    post_id = schedule_post(post_text, link_url, due_at_utc)
+    post_id = schedule_post(full_post_text, due_at_utc)
     if not post_id:
         log.error("Failed to schedule post — aborting")
         return
