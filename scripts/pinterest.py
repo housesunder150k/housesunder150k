@@ -39,8 +39,18 @@ Environment variables required:
   SUPABASE_KEY                  — Supabase service role key
   WEBFLOW_API_TOKEN             — for fetching latest article from Webflow CMS
 
+Deduplication:
+  On Mondays, fetches up to 10 recent articles from Webflow and picks the first
+  whose webflow_item_id is not already in social_posts for pinterest/article.
+  Aborts with an error if all candidates have been used.
+
+Post log:
+  Every successfully scheduled post is recorded in social_posts (Supabase).
+  This table is the source of truth for deduplication and analytics joins.
+
 Changes:
   2026-08-30: Initial implementation — adapted from linkedin.py
+  2026-08-31: social_posts log + article deduplication
 """
 
 import os
@@ -79,10 +89,13 @@ WEBFLOW_ARTICLES_COLLECTION = "6a6de940eb6dc0e3344431d6"
 SITE_BASE_URL               = "https://housesunder150k.com"
 BUFFER_API_URL              = "https://api.buffer.com"
 
+# Number of recent Webflow articles to fetch as deduplication candidates
+ARTICLE_CANDIDATE_LIMIT = 10
+
 CLAUDE_MODEL      = "claude-sonnet-4-6"
 CLAUDE_MAX_TOKENS = 300  # Pinterest 500 char limit minus URL (~65) and newlines
 
-PINTEREST_BOARD_ID  = os.environ["PINTEREST_BOARD_ID"]   # Buffer board ID for 'Houses Under $150,000'
+PINTEREST_BOARD_ID  = os.environ["PINTEREST_BOARD_ID"]   # Pinterest native serviceId for 'Houses Under $150,000' board (1096837752938909192)
 PIN_DESCRIPTION_MAX = 420  # chars — leaves room for \n\n + URL within 500 char limit
 
 CT_TZ = pytz.timezone("America/Chicago")
@@ -168,10 +181,65 @@ def get_deal_of_the_day() -> dict | None:
         return None
 
 # ---------------------------------------------------------------------------
-# Webflow — fetch most recent article
+# Supabase — social_posts log
 # ---------------------------------------------------------------------------
 
-def get_latest_article() -> dict | None:
+def get_posted_source_ids(platform: str, post_type: str) -> set[str]:
+    """Return the set of source_ids already posted for this platform+post_type."""
+    url = f"{SUPABASE_URL}/rest/v1/social_posts"
+    params = {
+        "select": "source_id",
+        "platform": f"eq.{platform}",
+        "post_type": f"eq.{post_type}",
+    }
+    try:
+        r = requests.get(url, headers=_sb_headers(), params=params, timeout=10)
+        r.raise_for_status()
+        return {row["source_id"] for row in r.json()}
+    except Exception as e:
+        log.error(f"Supabase get_posted_source_ids error: {e}")
+        return set()
+
+
+def log_social_post(
+    platform: str,
+    post_type: str,
+    source_id: str,
+    source_url: str,
+    buffer_post_id: str,
+    buffer_channel_id: str,
+    scheduled_at: datetime,
+    post_text: str,
+) -> bool:
+    """Insert a row into social_posts. Returns True on success."""
+    url = f"{SUPABASE_URL}/rest/v1/social_posts"
+    payload = {
+        "platform": platform,
+        "post_type": post_type,
+        "source_id": source_id,
+        "source_url": source_url,
+        "buffer_post_id": buffer_post_id,
+        "buffer_channel_id": BUFFER_CHANNEL_ID,
+        "scheduled_at": scheduled_at.isoformat(),
+        "status": "scheduled",
+        "post_text": post_text,
+    }
+    try:
+        r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
+        r.raise_for_status()
+        log.info(f"social_posts logged: platform={platform} post_type={post_type} source_id={source_id}")
+        return True
+    except Exception as e:
+        log.error(f"Supabase log_social_post error: {e}")
+        return False
+
+
+# ---------------------------------------------------------------------------
+# Webflow — fetch article candidates (deduplicated)
+# ---------------------------------------------------------------------------
+
+def get_latest_article(posted_ids: set[str]) -> dict | None:
+    """Fetch recent articles and return the first not already posted to Pinterest."""
     url = f"https://api.webflow.com/v2/collections/{WEBFLOW_ARTICLES_COLLECTION}/items"
     headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
@@ -180,7 +248,7 @@ def get_latest_article() -> dict | None:
     params = {
         "sortBy": "lastPublished",
         "sortOrder": "desc",
-        "limit": 1,
+        "limit": ARTICLE_CANDIDATE_LIMIT,
     }
     try:
         r = requests.get(url, headers=headers, params=params, timeout=15)
@@ -189,24 +257,34 @@ def get_latest_article() -> dict | None:
         if not items:
             log.warning("No articles found in Webflow CMS")
             return None
-        item = items[0]
-        fd = item.get("fieldData", {})
-        slug = item.get("slug") or fd.get("slug", "")
-        article_url_path = fd.get("article-url") or (f"/articles/{slug}" if slug else "")
+        for item in items:
+            webflow_item_id = item.get("id", "")
+            if webflow_item_id in posted_ids:
+                log.info(f"Skipping already-posted article: {webflow_item_id}")
+                continue
+            fd = item.get("fieldData", {})
+            slug = item.get("slug") or fd.get("slug", "")
+            article_url_path = fd.get("article-url") or (f"/articles/{slug}" if slug else "")
 
-        # Featured image — Webflow returns as {"url": "...", "alt": "..."}
-        featured_image = fd.get("featured-image") or {}
-        image_url = featured_image.get("url", "") if isinstance(featured_image, dict) else ""
+            # Featured image — Webflow returns as {"url": "...", "alt": "..."}
+            featured_image = fd.get("featured-image") or {}
+            image_url = featured_image.get("url", "") if isinstance(featured_image, dict) else ""
 
-        result = {
-            "name": fd.get("name", ""),
-            "excerpt": fd.get("excerpt", ""),
-            "url": f"{SITE_BASE_URL}{article_url_path}" if article_url_path else "",
-            "image_url": image_url,
-            "slug": slug,
-        }
-        log.info(f"Latest article: {result['name']} | image={'yes' if image_url else 'MISSING'}")
-        return result
+            result = {
+                "webflow_item_id": webflow_item_id,
+                "name": fd.get("name", ""),
+                "excerpt": fd.get("excerpt", ""),
+                "url": f"{SITE_BASE_URL}{article_url_path}" if article_url_path else "",
+                "image_url": image_url,
+                "slug": slug,
+            }
+            log.info(f"Selected article: {result['name']} ({webflow_item_id}) | image={'yes' if image_url else 'MISSING'}")
+            return result
+        log.error(
+            f"All {len(items)} recent Webflow articles have already been posted to Pinterest. "
+            "Publish a new article or the pipeline will skip Mondays until one is available."
+        )
+        return None
     except Exception as e:
         log.error(f"Webflow get_latest_article error: {e}")
         return None
@@ -407,9 +485,11 @@ def run(dry_run: bool = False, force_monday: bool = False):
     link_url = None
 
     if is_monday(force_monday):
-        article = get_latest_article()
+        posted_ids = get_posted_source_ids("pinterest", "article")
+        log.info(f"Already-posted article IDs on Pinterest: {len(posted_ids)}")
+        article = get_latest_article(posted_ids)
         if not article:
-            log.error("No article available — aborting")
+            log.error("No unused article available — aborting")
             return
         if not article.get("image_url"):
             log.error("Article has no image URL — aborting")
@@ -441,6 +521,7 @@ def run(dry_run: bool = False, force_monday: bool = False):
             log.error("Claude returned no listing pin — aborting")
             return
         log.info(f"Listing pin generated ({len(pin_text)} chars)")
+        article = None  # not used in listing path; referenced below for source_id
 
     due_at_utc = random_post_time_utc()
 
@@ -466,6 +547,20 @@ def run(dry_run: bool = False, force_monday: bool = False):
     if not post_id:
         log.error("Failed to schedule pin — aborting")
         return
+
+    # Log to social_posts for deduplication and analytics
+    source_id = article["webflow_item_id"] if is_monday(force_monday) else listing.get("slug", "")
+    post_type = "article" if is_monday(force_monday) else "listing"
+    log_social_post(
+        platform="pinterest",
+        post_type=post_type,
+        source_id=source_id,
+        source_url=link_url,
+        buffer_post_id=post_id,
+        buffer_channel_id=BUFFER_CHANNEL_ID,
+        scheduled_at=due_at_utc,
+        post_text=full_pin_text,
+    )
 
     log.info(
         f"=== Pinterest Publisher complete | "
