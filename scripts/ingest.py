@@ -24,6 +24,12 @@ Changes (2026-08-17):
 - list_date captured from RealtyAPI search result and stored in Supabase at ingest time.
   Used by maintenance job to calculate days_on_market when a listing sells.
 
+Changes (2026-09-01):
+- short_summary, social_caption, city, state added to db_insert_published and published_listings
+  Supabase table. These fields are required by the LinkedIn pipeline to generate listing posts.
+  Previously the LinkedIn job queried for these columns but they didn't exist, causing a 400
+  on every run. Columns are nullable; existing rows retain NULL values.
+
 Changes (2026-08-29):
 - Image alt text overhauled to target GSC impression queries.
   New make_image_alt() generates varied keyword patterns matching real search queries:
@@ -695,6 +701,10 @@ def db_insert_published(
     is_deal_of_day: bool = False,
     gallery_image_ids: list[str] | None = None,
     list_date: str | None = None,
+    short_summary: str | None = None,
+    social_caption: str | None = None,
+    city: str | None = None,
+    state: str | None = None,
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
@@ -707,6 +717,10 @@ def db_insert_published(
         "is_deal_of_day": is_deal_of_day,
         "gallery_image_ids": gallery_image_ids or [],
         "list_date": list_date,
+        "short_summary": short_summary,
+        "social_caption": social_caption,
+        "city": city,
+        "state": state,
     }
     try:
         r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
@@ -1550,6 +1564,10 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         is_deal_of_day=is_hero,
         gallery_image_ids=gallery_image_ids,
         list_date=list_date,
+        short_summary=content.get("SHORT_SUMMARY", "") or None,
+        social_caption=content.get("SOCIAL_CAPTION", "") or None,
+        city=addr.get("city") or None,
+        state=addr.get("state") or None,
     )
 
     log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, gallery_photos={len(gallery_image_ids)}, list_date={list_date})")
