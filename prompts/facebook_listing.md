@@ -20,9 +20,8 @@ VOICE:
 FORMAT:
 Line 1: The hook. Price + location + the one thing that makes this property worth stopping for.
 Line 2: One sentence of context or color — the category angle, the acreage, the history, the view.
-Line 3: The URL on its own line.
 
-Total: 3 lines. Tight. Do not exceed this structure.
+Total: 2 lines only. Do not add a URL, a third line, or anything else. The script appends the URL automatically.
 
 TONE EXAMPLES (do not copy these verbatim — they are style references only):
 - "$74,000. Rural Ohio. 3 bedrooms on 2 acres. This exists."
