@@ -119,7 +119,6 @@ def random_post_time_utc() -> datetime:
 
     # If we're past the end of today's window, use tomorrow
     if now_ct >= window_end:
-        from datetime import date, timedelta
         tomorrow = today + timedelta(days=1)
         window_start = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_START_HOUR, 0))
         window_end   = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_END_HOUR, 0))

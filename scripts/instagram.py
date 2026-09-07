@@ -123,8 +123,7 @@ def random_post_time_utc() -> datetime:
 
     # If we're past the end of today's window, use tomorrow
     if now_ct >= window_end:
-        from datetime import timedelta as td
-        tomorrow = today + td(days=1)
+        tomorrow = today + timedelta(days=1)
         window_start = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_START_HOUR, 0))
         window_end   = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_END_HOUR, 0))
         log.info("Past 10pm CT — scheduling in tomorrow's window")
@@ -329,6 +328,11 @@ def schedule_post(caption: str, image_url: str, due_at_utc: datetime) -> str | N
             "schedulingType": "automatic",
             "mode": "customScheduled",
             "dueAt": due_at_iso,
+            "metadata": {
+                "instagram": {
+                    "type": "post"
+                }
+            },
             "assets": [
                 {"image": {"url": image_url}}
             ],
