@@ -330,7 +330,8 @@ def schedule_post(caption: str, image_url: str, due_at_utc: datetime) -> str | N
             "dueAt": due_at_iso,
             "metadata": {
                 "instagram": {
-                    "type": "post"
+                    "type": "post",
+                    "shouldShareToFeed": True
                 }
             },
             "assets": [

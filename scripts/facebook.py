@@ -326,6 +326,11 @@ def schedule_post(caption: str, image_url: str, due_at_utc: datetime) -> str | N
             "schedulingType": "automatic",
             "mode": "customScheduled",
             "dueAt": due_at_iso,
+            "metadata": {
+                "facebook": {
+                    "type": "post"
+                }
+            },
             "assets": [
                 {"image": {"url": image_url}}
             ],
