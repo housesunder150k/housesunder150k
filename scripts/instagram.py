@@ -85,10 +85,10 @@ CLAUDE_MAX_TOKENS = 80    # 1-2 line Instagram caption — intentionally minimal
 
 CT_TZ = pytz.timezone("America/Chicago")
 
-# Posting window: 90-minute jitter from cron fire time
-# Start at 15 min (not 5) to naturally offset from facebook.py on the same cron
-POST_WINDOW_START  = 15
-POST_WINDOW_MINUTES = 90
+# Posting window: 7am-10pm CT, random time within that window regardless of cron fire time
+# Instagram uses same window as Facebook but picks independently — natural offset results
+POST_WINDOW_START_HOUR = 7   # 7am CT
+POST_WINDOW_END_HOUR   = 22  # 10pm CT
 
 # ---------------------------------------------------------------------------
 # Prompt loader
@@ -109,13 +109,38 @@ def get_now_ct() -> datetime:
 
 def random_post_time_utc() -> datetime:
     """
-    Randomize within 90-minute window, starting 15 min after cron fire.
-    The 15-min offset naturally separates Instagram posts from Facebook posts
-    when both scripts run on the same cron schedule.
+    Pick a random time within the 7am-10pm CT window.
+    If the current CT time is already past 10pm, schedule for tomorrow's window.
+    Always schedules at least 5 minutes in the future.
+    Instagram picks its time independently from Facebook — natural offset results.
     """
     now_ct = get_now_ct()
-    offset_minutes = random.randint(POST_WINDOW_START, POST_WINDOW_MINUTES)
-    scheduled_ct = now_ct + timedelta(minutes=offset_minutes)
+    today = now_ct.date()
+
+    # Build the window for today
+    window_start = CT_TZ.localize(datetime(today.year, today.month, today.day, POST_WINDOW_START_HOUR, 0))
+    window_end   = CT_TZ.localize(datetime(today.year, today.month, today.day, POST_WINDOW_END_HOUR, 0))
+
+    # If we're past the end of today's window, use tomorrow
+    if now_ct >= window_end:
+        from datetime import timedelta as td
+        tomorrow = today + td(days=1)
+        window_start = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_START_HOUR, 0))
+        window_end   = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_END_HOUR, 0))
+        log.info("Past 10pm CT — scheduling in tomorrow's window")
+
+    # Pick randomly from max(window_start, now+5min) to window_end
+    earliest = max(window_start, now_ct + timedelta(minutes=5))
+
+    earliest_ts = int(earliest.timestamp())
+    latest_ts   = int(window_end.timestamp())
+
+    if earliest_ts >= latest_ts:
+        scheduled_ct = earliest
+    else:
+        scheduled_ts = random.randint(earliest_ts, latest_ts)
+        scheduled_ct = datetime.fromtimestamp(scheduled_ts, tz=CT_TZ)
+
     scheduled_utc = scheduled_ct.astimezone(pytz.utc)
     log.info(f"Scheduled post time: {scheduled_ct.strftime('%H:%M CT')} / {scheduled_utc.strftime('%H:%M UTC')}")
     return scheduled_utc

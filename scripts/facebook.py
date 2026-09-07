@@ -83,8 +83,9 @@ CLAUDE_MAX_TOKENS = 150   # 3-line Facebook caption — tight by design
 
 CT_TZ = pytz.timezone("America/Chicago")
 
-# Posting window: 90-minute jitter from cron fire time
-POST_WINDOW_MINUTES = 90
+# Posting window: 7am-10pm CT, random time within that window regardless of cron fire time
+POST_WINDOW_START_HOUR = 7   # 7am CT
+POST_WINDOW_END_HOUR   = 22  # 10pm CT
 
 # ---------------------------------------------------------------------------
 # Prompt loader
@@ -105,12 +106,40 @@ def get_now_ct() -> datetime:
 
 def random_post_time_utc() -> datetime:
     """
-    Randomize within 90 minutes of the cron fire time.
-    Safety clamp: never schedule in the past or within 5 minutes of now.
+    Pick a random time within the 7am-10pm CT window.
+    If the current CT time is already past 10pm, schedule for tomorrow's window.
+    Always schedules at least 5 minutes in the future.
     """
     now_ct = get_now_ct()
-    offset_minutes = random.randint(5, POST_WINDOW_MINUTES)
-    scheduled_ct = now_ct + timedelta(minutes=offset_minutes)
+    today = now_ct.date()
+
+    # Build the window for today
+    window_start = CT_TZ.localize(datetime(today.year, today.month, today.day, POST_WINDOW_START_HOUR, 0))
+    window_end   = CT_TZ.localize(datetime(today.year, today.month, today.day, POST_WINDOW_END_HOUR, 0))
+
+    # If we're past the end of today's window, use tomorrow
+    if now_ct >= window_end:
+        from datetime import date, timedelta
+        tomorrow = today + timedelta(days=1)
+        window_start = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_START_HOUR, 0))
+        window_end   = CT_TZ.localize(datetime(tomorrow.year, tomorrow.month, tomorrow.day, POST_WINDOW_END_HOUR, 0))
+        log.info(f"Past 10pm CT — scheduling in tomorrow's window")
+
+    # If we're before the window start (e.g. cron fired at 2am), use today's window
+    # If we're inside the window, pick randomly from now+5min to window end
+    earliest = max(window_start, now_ct + timedelta(minutes=5))
+
+    # Convert to timestamps for randint
+    earliest_ts = int(earliest.timestamp())
+    latest_ts   = int(window_end.timestamp())
+
+    if earliest_ts >= latest_ts:
+        # Window is too tight — schedule at earliest
+        scheduled_ct = earliest
+    else:
+        scheduled_ts = random.randint(earliest_ts, latest_ts)
+        scheduled_ct = datetime.fromtimestamp(scheduled_ts, tz=CT_TZ)
+
     scheduled_utc = scheduled_ct.astimezone(pytz.utc)
     log.info(f"Scheduled post time: {scheduled_ct.strftime('%H:%M CT')} / {scheduled_utc.strftime('%H:%M UTC')}")
     return scheduled_utc
