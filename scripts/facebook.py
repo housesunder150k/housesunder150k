@@ -70,7 +70,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 BUFFER_API_KEY     = os.environ["BUFFER_API_KEY"]
-BUFFER_CHANNEL_ID  = os.environ["BUFFER_FACEBOOK_CHANNEL_ID"]   # 6a974ae7065799be466cdc8e
+BUFFER_CHANNEL_ID  = os.environ["BUFFER_FACEBOOK_CHANNEL_ID"]   # 6a9ef63ecd8b9c702c23ead7 (HousesUnder150K Page)
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 SUPABASE_URL       = os.environ["SUPABASE_URL"]
 SUPABASE_KEY       = os.environ["SUPABASE_KEY"]
