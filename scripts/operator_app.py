@@ -233,7 +233,8 @@ async def login_submit(request: Request):
         max_age=SESSION_MAX_AGE,
         httponly=True,       # JS cannot read this cookie
         secure=True,         # HTTPS only (Railway always serves HTTPS)
-        samesite="strict",   # Never sent cross-site
+        samesite="lax",      # Sent on top-level navigations (needed for post-login redirect)
+                             # Still blocks cross-site POST — adequate for internal tool
     )
     log.info(f"Login: {username}")
     return response
