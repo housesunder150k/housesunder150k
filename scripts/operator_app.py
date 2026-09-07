@@ -40,6 +40,7 @@ import logging
 from datetime import datetime, timezone
 
 import requests
+import pytz
 from fastapi import FastAPI, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 
@@ -252,14 +253,17 @@ def logout():
 
 @app.get("/api/queue")
 def get_queue(_: str = Depends(require_session)):
+    today_ct = datetime.now(pytz.timezone("America/Chicago")).date().isoformat()
     rows = sb_get("published_listings", {
         "select": "slug,headline,price,city,state,category,score,hero_image_url",
         "fb_ig_approved_facebook": "eq.false",
         "fb_ig_approved_instagram": "eq.false",
         "fb_ig_skipped": "eq.false",
         "status": "eq.Active",
+        "score": "gte.7",
+        "published_date_ct": f"eq.{today_ct}",
         "order": "score.desc,published_at.desc",
-        "limit": "200",
+        "limit": "100",
     })
     return JSONResponse({"rows": rows})
 
