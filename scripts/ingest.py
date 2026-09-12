@@ -1491,6 +1491,10 @@ def prefilter_listing(listing: dict) -> bool:
         log.info(f"[PREFILTER] Skipping — manufactured/mobile home")
         return False
 
+    if beds == 0 or baths == 0:
+        log.info(f"[PREFILTER] Skipping — beds={beds} baths={baths} — not a liveable home")
+        return False
+
     return True
 
 
