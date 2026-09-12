@@ -298,17 +298,14 @@ TIER MAP: 1-3=SKIP | 4-5=BELOW_THRESHOLD | 6=PUBLISH | 7-8=FEATURED | 9-10=HERO
 CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=land is story | HISTORIC=pre-1950 character | RENOVATED=updated systems | CHARACTER=unique details | HIDDEN_GEM=underrated value | TOO_GOOD_TO_BE_TRUE=price seems wrong | WHAT_IF=lifestyle/land fantasy"""
 
 
-CONTENT_PROMPT_TEMPLATE = """You looked at a house and scored it. Tell someone what you found — the score is the frame, the narrative is the explanation.
+CONTENT_PROMPT_TEMPLATE = """You looked at a house. Tell someone what you saw.
 
-The listing data includes the composite score and each category score. Your narrative should explain WHY it scored the way it did: what drove Property Merit up or down, what condition signals you saw, whether the price is genuinely good relative to the market, and what the market conditions mean for a buyer today. The reader sees the score table before reading your words — they want the story behind the numbers, not a repeat of the facts.
+The listing data includes score context — use it as background awareness, not as a structure to follow. Do not explain the scores. Do not reference the scores. Do not advise the reader on what the scores mean for them. The score table is already visible above your words — the reader does not need you to narrate it.
 
-Structure guidance (let the property dictate — do not follow this rigidly):
-- Open with the most interesting Property Merit signal — the thing that stops the scroll
-- Work through condition honestly — what's good, what needs work, what's unknown
-- Address price per square foot and market value in plain language
-- Close with market conditions context — what it means for a buyer looking today
-
-Do NOT open with score commentary like "This listing scored a 7.2" — weave the score rationale into editorial voice instead.
+FRAMING:
+- Open with what makes this listing remarkable relative to its market. Not the property in isolation — why this price, this size, this location is unusual for where it is. Give the reader the context that makes the number land.
+- Name the opportunity in human terms. Room for a family. Space to expand. Land to grow into. A historic house they can make their own. Say what a person could actually do here, not what the listing "offers."
+- The downside gets one paragraph. Name it plainly and move on. Do not soften it, but do not end on it. End on what the price makes possible — or what the property makes possible at this price.
 
 You are not a copywriter. You are not a real estate agent. You are someone with taste and a point of view who actually looked at this property and is describing it honestly to a friend who asked. You notice things. You have opinions. You say what something is like, not what someone should feel about it.
 
