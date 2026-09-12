@@ -193,11 +193,12 @@ SCORING WEIGHTS: Property Merit (50%) + Condition (25%) + Price per Sq Ft (15%) 
 
 PRICE PER SQ FT SCORING (compare LISTING_PSF to ZIP_MEDIAN_PSF):
 - More than 40% below zip median: 9-10
-- 20-40% below zip median: 7-8
-- 0-20% below zip median: 5-6
-- 0-20% above zip median: 3-4
-- More than 20% above zip median: 1-2
+- 20-40% below zip median: 8-9 (score toward top of range — a real discount is a real discount even with thin data)
+- 0-20% below zip median: 6-7
+- 0-20% above zip median: 4-5
+- More than 20% above zip median: 1-3
 - If zip median $/sqft unavailable: score 5 (neutral), detail = "insufficient zip $/sqft data"
+- Thin data caveat: note in detail line but do not discount the score — 8 comps showing 33% below median is still a meaningful signal
 
 PRICE VS MARKET SCORING (listing price vs ZIP_MEDIAN_SALE_PRICE):
 - More than 50% below median: 9-10
@@ -207,10 +208,15 @@ PRICE VS MARKET SCORING (listing price vs ZIP_MEDIAN_SALE_PRICE):
 - Above median: 1-2
 - Caution: if zip median appears driven by acreage/land sales rather than comparable homes, note this.
 
-MARKET CONDITIONS SCORING (ZIP_MEDIAN_DOM, ZIP_SALE_TO_LIST, ZIP_PRICE_DROPS_PCT — weight equally):
-- Long DOM + sale-to-list <97% + price drops >25% = strong buyer's market = 8-10
-- Mixed signals = 5-7
-- Short DOM + sale-to-list >100% + price drops <10% = competitive seller's market = 1-4
+MARKET CONDITIONS SCORING (ZIP_MEDIAN_DOM, ZIP_SALE_TO_LIST, ZIP_PRICE_DROPS_PCT):
+Market conditions can only add to the composite, never subtract. Floor is always 5. A competitive market means the buyer needs to move faster — it does not make the house worse.
+
+- Sale-to-list >10% in buyer's favor (i.e. <90% sale-to-list) AND high price drops AND long DOM: 9-10
+- Clear buyer's market (sale-to-list <97%, price drops >20%, DOM above zip average): 7-8
+- Mild buyer's advantage or neutral: 6
+- Balanced or competitive market (any direction): 5 (floor — never score below 5 regardless of how competitive the market is)
+
+Rule: if sale-to-list, price drops, or DOM swing more than 10% in the buyer's favor on any single signal, it is a positive. Never use market conditions to reduce a score.
 
 CONDITION SCORING:
 - Move-in ready / renovated with specific system dates (roof, HVAC, windows): 8-10
