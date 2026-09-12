@@ -259,6 +259,8 @@ NEGATIVE MODIFIERS:
 - Sparse description (3 sentences or fewer): -1
 - Investor/flipper language ("bring your vision", "investor special", "as-is opportunity"): -1
 - Flood zone AE (required flood insurance — affects mortgage qualification): -0.5
+- DAYS_ON_MARKET 180-364: -0.5 (market has passed on this multiple times)
+- DAYS_ON_MARKET 365+: listings this stale are prefiltered and will not reach scoring
 
 AS-IS EXCEPTION: As-is is fine when the property has historic significance, significant acreage, waterfront access, or genuine architectural value. A 130-year-old stone farmhouse on 10 acres sold as-is is still a 7. A 1973 ranch with no description sold as-is is a 2.
 
@@ -1347,6 +1349,7 @@ def build_scoring_input(
     redfin_market: dict | None,
     zip_median_psf: float | None,
     price_per_sqft: float | None,
+    days_listed: int | None = None,
 ) -> str:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
@@ -1369,6 +1372,16 @@ def build_scoring_input(
     description = details.get("description", "") or "(no description)"
 
     psf_str     = f"${price_per_sqft:.0f}/sqft" if price_per_sqft else "null (sqft unavailable)"
+
+    # List age signal
+    if days_listed is not None and days_listed >= 180:
+        list_age_str = f"{days_listed} days on market — approaching stale territory, market has passed on this repeatedly"
+    elif days_listed is not None and days_listed >= 90:
+        list_age_str = f"{days_listed} days on market"
+    elif days_listed is not None:
+        list_age_str = f"{days_listed} days on market"
+    else:
+        list_age_str = "unknown"
 
     if redfin_market:
         median_price   = redfin_market.get("median_sale_price", 0)
@@ -1409,6 +1422,7 @@ ACREAGE: {acreage}
 POOL: {pool}
 WATERFRONT: {waterfront}
 LISTING_PSF: {psf_str}
+DAYS_ON_MARKET: {list_age_str}
 
 REDFIN MARKET DATA (zip {zip_code}):
 {market_block}
@@ -1485,8 +1499,9 @@ def score_listing(
     redfin_market: dict | None,
     zip_median_psf: float | None,
     price_per_sqft: float | None,
+    days_listed: int | None = None,
 ) -> tuple[dict | None, float]:
-    scoring_input = build_scoring_input(listing, redfin_market, zip_median_psf, price_per_sqft)
+    scoring_input = build_scoring_input(listing, redfin_market, zip_median_psf, price_per_sqft, days_listed)
     raw, cost = call_claude(SCORING_PROMPT, scoring_input, "scoring")
     if not raw:
         return None, cost
@@ -1875,6 +1890,22 @@ def process_listing(
     list_date  = listing.get("listDate")
     total_cost = 0.0
 
+    # Calculate days since listing
+    list_date  = listing.get("listDate")
+    days_listed = None
+    if list_date:
+        try:
+            listed_on = date.fromisoformat(list_date)
+            days_listed = (get_today_ct() - listed_on).days
+        except (ValueError, TypeError):
+            pass
+
+    # Hard prefilter: listings on market 365+ days are market rejects, not hidden gems
+    if days_listed is not None and days_listed >= 365:
+        log.info(f"Skipping {slug} — on market {days_listed} days (listed {list_date}) — market reject")
+        db_upsert_seen(address_key, slug, 0, "SKIP")
+        return "skipped_score", 0.0, False
+
     log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) zip={zip_code} ---")
 
     if db_slug_published(slug):
@@ -1930,7 +1961,7 @@ def process_listing(
     sqft = parse_int(listing.get("details", {}).get("sqft"))
     price_per_sqft = round(price / sqft, 1) if sqft > 0 else None
 
-    score_data, score_cost = score_listing(listing, redfin_market, zip_median_psf, price_per_sqft)
+    score_data, score_cost = score_listing(listing, redfin_market, zip_median_psf, price_per_sqft, days_listed)
     total_cost += score_cost
     if not score_data:
         return "error", total_cost, False
@@ -1939,7 +1970,7 @@ def process_listing(
     tier  = score_data.get("TIER", "SKIP")
     db_upsert_seen(address_key, slug, score, tier)
 
-    if score <= 5 or tier == "BELOW_THRESHOLD":
+    if score < 6 or tier in ("BELOW_THRESHOLD", "SKIP"):
         log.info(f"Score {score} tier={tier} — discarding {slug}")
         return "skipped_score", total_cost, False
 
