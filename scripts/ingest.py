@@ -1939,8 +1939,8 @@ def process_listing(
     tier  = score_data.get("TIER", "SKIP")
     db_upsert_seen(address_key, slug, score, tier)
 
-    if score <= 5:
-        log.info(f"Score {score} <= 5 — discarding {slug}")
+    if score <= 5 or tier == "BELOW_THRESHOLD":
+        log.info(f"Score {score} tier={tier} — discarding {slug}")
         return "skipped_score", total_cost, False
 
     content, content_cost = generate_content(listing, score_data)
