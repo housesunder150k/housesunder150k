@@ -1009,8 +1009,11 @@ def fetch_redfin_market_data(zip_code: str) -> dict | None:
     return result
 
 
-def fetch_redfin_psf_data(zip_code: str) -> float | None:
-    """Fetch /recentlySold for a zip and return median pricePerSqFt, or None if <10 values."""
+def fetch_redfin_psf_data(zip_code: str) -> tuple[float | None, int]:
+    """Fetch /recentlySold for a zip and return (median pricePerSqFt, comp_count).
+    Returns (None, 0) on fetch failure. Returns (median, count) regardless of count —
+    caller uses count to assess reliability; thin market flag set if count < 10.
+    """
     try:
         r = requests.get(
             f"{REALTYAPI_REDFIN_BASE}/recentlySold",
@@ -1022,7 +1025,7 @@ def fetch_redfin_psf_data(zip_code: str) -> float | None:
         data = r.json()
     except requests.RequestException as e:
         log.error(f"Redfin /recentlySold failed [{zip_code}]: {e}")
-        return None
+        return None, 0
 
     homes = (data.get("homes") or {}).get("homes", [])
     psf_values = []
@@ -1031,19 +1034,21 @@ def fetch_redfin_psf_data(zip_code: str) -> float | None:
         if psf and isinstance(psf, (int, float)) and psf > 0:
             psf_values.append(float(psf))
 
-    if len(psf_values) < 10:
-        log.info(f"Redfin [{zip_code}]: only {len(psf_values)} valid PSF values — thin market (psf)")
-        return None
+    count = len(psf_values)
+    if count == 0:
+        log.info(f"Redfin [{zip_code}]: 0 valid PSF values — no median available")
+        return None, 0
 
     psf_values.sort()
-    mid = len(psf_values) // 2
-    if len(psf_values) % 2 == 0:
+    mid = count // 2
+    if count % 2 == 0:
         median_psf = (psf_values[mid - 1] + psf_values[mid]) / 2.0
     else:
         median_psf = psf_values[mid]
 
-    log.info(f"Redfin [{zip_code}]: zip median PSF=${median_psf:.0f} ({len(psf_values)} comps)")
-    return round(median_psf, 1)
+    reliability = "thin" if count < 10 else "reliable"
+    log.info(f"Redfin [{zip_code}]: zip median PSF=${median_psf:.0f} ({count} comps, {reliability})")
+    return round(median_psf, 1), count
 
 
 def is_thin_market(homes_sold: int, aggregate_price_data: list, psf_count: int) -> bool:
@@ -1364,15 +1369,21 @@ def build_scoring_input(
     description = details.get("description", "") or "(no description)"
 
     psf_str     = f"${price_per_sqft:.0f}/sqft" if price_per_sqft else "null (sqft unavailable)"
-    zip_psf_str = f"${zip_median_psf:.0f}/sqft" if zip_median_psf else "unavailable"
 
     if redfin_market:
-        median_price = redfin_market.get("median_sale_price", 0)
-        homes_sold   = redfin_market.get("homes_sold", 0)
-        median_dom   = redfin_market.get("median_dom", 0.0)
-        sale_to_list = redfin_market.get("sale_to_list", 0.0)
-        price_drops  = redfin_market.get("price_drops_pct", 0.0)
-        thin         = redfin_market.get("thin_market", False)
+        median_price   = redfin_market.get("median_sale_price", 0)
+        homes_sold     = redfin_market.get("homes_sold", 0)
+        median_dom     = redfin_market.get("median_dom", 0.0)
+        sale_to_list   = redfin_market.get("sale_to_list", 0.0)
+        price_drops    = redfin_market.get("price_drops_pct", 0.0)
+        thin           = redfin_market.get("thin_market", False)
+        psf_count      = redfin_market.get("psf_comp_count", 0)
+        if zip_median_psf and psf_count < 10:
+            zip_psf_str = f"${zip_median_psf:.0f}/sqft ({psf_count} comps, thin — treat as directional)"
+        elif zip_median_psf:
+            zip_psf_str = f"${zip_median_psf:.0f}/sqft ({psf_count} comps)"
+        else:
+            zip_psf_str = "unavailable"
         market_block = (
             f"ZIP_MEDIAN_SALE_PRICE: ${median_price:,}\n"
             f"ZIP_HOMES_SOLD_LAST_MONTH: {homes_sold}\n"
@@ -1383,6 +1394,7 @@ def build_scoring_input(
             f"MARKET_DATA_STATE: {'thin' if thin else 'reliable'}"
         )
     else:
+        zip_psf_str = "unavailable"
         market_block = "MARKET_DATA_STATE: null (no Redfin data available for this zip)"
 
     return f"""PRICE: {price}
@@ -1882,12 +1894,13 @@ def process_listing(
     # --- Redfin market data fetch (cached per zip per run) ---
     if zip_code and zip_code not in redfin_market_cache:
         redfin_market_cache[zip_code] = fetch_redfin_market_data(zip_code)
-        redfin_psf_cache[zip_code] = fetch_redfin_psf_data(zip_code)
+        redfin_psf_cache[zip_code] = fetch_redfin_psf_data(zip_code)  # (median, count)
         run_stats["redfin_api_credits_used"] += 2
         time.sleep(0.2)
 
     redfin_market = redfin_market_cache.get(zip_code) if zip_code else None
-    zip_median_psf = redfin_psf_cache.get(zip_code) if zip_code else None
+    psf_result = redfin_psf_cache.get(zip_code) if zip_code else (None, 0)
+    zip_median_psf, psf_comp_count = psf_result if psf_result else (None, 0)
 
     # True null — no Redfin data at all: skip this listing
     if zip_code and redfin_market is None:
@@ -1898,14 +1911,14 @@ def process_listing(
         return "skipped_redfin_null", 0.0, False
 
     # Assess thin market and stamp onto redfin_market dict for downstream use
-    psf_count = 0 if zip_median_psf is None else 10  # None means <10 valid values
     if redfin_market:
         thin = is_thin_market(
             redfin_market["homes_sold"],
             redfin_market["aggregate_price_data"],
-            psf_count,
+            psf_comp_count,
         )
         redfin_market["thin_market"] = thin
+        redfin_market["psf_comp_count"] = psf_comp_count
         if thin:
             run_stats["redfin_thin_market_count"] += 1
             log.info(f"Thin market: zip {zip_code}")
