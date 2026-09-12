@@ -1455,11 +1455,21 @@ def prefilter_listing(listing: dict) -> bool:
     description = details.get("description", "") or ""
     desc_lower = description.lower()
     beds = parse_int(details.get("numBedrooms"))
+    baths = parse_int(details.get("numBathrooms"))
     sqft = parse_int(details.get("sqft"))
     lot_acres = details.get("lotAcres")
     year_built = parse_int(details.get("yearBuilt"))
     waterfront = details.get("waterfront", False)
     pool = details.get("pool", False)
+
+    # Hard gates — check before anything else, floor qualifiers do not override these
+    if beds == 0 or baths == 0:
+        log.info(f"[PREFILTER] Skipping — beds={beds} baths={baths} — not a liveable home")
+        return False
+
+    if sqft > 0 and sqft < 700:
+        log.info(f"[PREFILTER] Skipping — sqft={sqft} — too small for a family")
+        return False
 
     has_floor = (
         waterfront
@@ -1487,14 +1497,6 @@ def prefilter_listing(listing: dict) -> bool:
 
     if any(w in desc_lower for w in ["manufactured", "mobile home", "modular", "double wide", "doublewide", "single wide"]):
         log.info(f"[PREFILTER] Skipping — manufactured/mobile home")
-        return False
-
-    if beds == 0 or baths == 0:
-        log.info(f"[PREFILTER] Skipping — beds={beds} baths={baths} — not a liveable home")
-        return False
-
-    if sqft > 0 and sqft < 700:
-        log.info(f"[PREFILTER] Skipping — sqft={sqft} — too small for a family")
         return False
 
     return True
