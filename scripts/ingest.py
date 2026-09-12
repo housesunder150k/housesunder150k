@@ -744,14 +744,14 @@ def db_batch_seen_recently(address_keys: list[str]) -> set[str]:
         return set()
 
 
-def db_upsert_seen(address_key: str, slug: str, score: int, tier: str) -> None:
+def db_upsert_seen(address_key: str, slug: str, score: int | float, tier: str) -> None:
     url = f"{SUPABASE_URL}/rest/v1/seen_listings"
     headers = _sb_headers()
     headers["Prefer"] = "resolution=merge-duplicates,return=minimal"
     payload = {
         "mls_number": address_key,
         "slug": slug,
-        "score": score,
+        "score": int(round(score)),  # seen_listings.score is INTEGER — composite is now float
         "tier": tier,
         "last_seen_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -798,7 +798,8 @@ def db_insert_published(
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
         "slug": slug, "mls_number": mls_number, "webflow_item_id": webflow_item_id,
-        "score": score, "tier": tier, "category": category, "headline": headline,
+        "score": int(round(score)),  # published_listings.score is INTEGER — composite is now float
+        "tier": tier, "category": category, "headline": headline,
         "hero_image_url": hero_image_url,
         "published_at": datetime.now(timezone.utc).isoformat(),
         "published_date_ct": today_ct.isoformat(),
