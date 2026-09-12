@@ -235,7 +235,7 @@ AUTOMATIC 6+ FLOOR (any one qualifies):
 
 POSITIVE SIGNALS (accumulate to reach 6 without a floor qualifier):
 - Recent renovation or major system update (roof/HVAC/windows) with specifics
-- Sqft: <800 = -1 | 800-1100 = neutral | 1100-1400 = +0.5 | 1400-1800 = +1 | 1800+ = +1.5
+- Sqft: 800-1100 = neutral | 1100-1400 = +0.5 | 1400-1800 = +1 | 1800+ = +1.5
 - Beds: 4 = +0.5 | 5+ = +1
 - Garage, outbuildings, barn, workshop
 - Character features: stained glass, exposed beams, hardwood, wraparound porch, clawfoot tub, built-ins, tin ceilings, wainscoting, fireplace, crown molding, original doors
@@ -254,9 +254,7 @@ NEGATIVE MODIFIERS:
 - Cash only / sold as-is AND no floor qualifier (no acreage, waterfront, historic character, views, or architectural value): -2 (distressed dump with no story for our audience)
 - Needs major work, no renovation history: -1
 - No photos: -1
-- Under 700 sqft: -1
 - HOA with high fees: -0.5
-- Sparse description (3 sentences or fewer): -1
 - Investor/flipper language ("bring your vision", "investor special", "as-is opportunity"): -1
 - Flood zone AE (required flood insurance — affects mortgage qualification): -0.5
 - DAYS_ON_MARKET 180-364: -0.5 (market has passed on this multiple times)
@@ -272,8 +270,8 @@ SCORING PRECISION NOTES:
 
 SCORING BANDS:
 1-3: Skip — no story, bad data, manufactured home, investor dump
-4-5: Below threshold — decent home, nothing editorial. Do not publish.
-6: Publish — one floor qualifier OR compelling accumulation of positives
+4-5: Below threshold — significant red flags, not suitable for our audience
+6: Publish — a family with conventional financing could buy this and live in it. At under $150K, imperfection is the baseline. An older home with unknown systems but solid size, real rooms, and no major red flags is a 6.
 7-8: Featured — strong floor qualifier + good description + clear story
 9-10: Hero / Deal of Day — exceptional on multiple dimensions, stops the scroll
 
@@ -1493,6 +1491,10 @@ def prefilter_listing(listing: dict) -> bool:
 
     if beds == 0 or baths == 0:
         log.info(f"[PREFILTER] Skipping — beds={beds} baths={baths} — not a liveable home")
+        return False
+
+    if sqft > 0 and sqft < 700:
+        log.info(f"[PREFILTER] Skipping — sqft={sqft} — too small for a family")
         return False
 
     return True
