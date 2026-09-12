@@ -30,6 +30,21 @@ Changes (2026-09-01):
   Previously the LinkedIn job queried for these columns but they didn't exist, causing a 400
   on every run. Columns are nullable; existing rows retain NULL values.
 
+Changes (2026-09-12 — Session 40):
+- Scoring model v2.0: five-category weighted composite score (Property Merit 50%, Condition 25%,
+  Price/SqFt 15%, Price vs Market 5%, Market Conditions 5%).
+- Redfin market data injected before scoring: /housingMarketTrends (median price, homes sold,
+  DOM, sale-to-list, price drops) + /recentlySold (zip median $/sqft from pricePerSqFt values).
+- Both Redfin calls cached per zip per run (2 credits/zip, ~14,200/month worst case).
+- Three data reliability states: reliable / thin / null. True null skips publishing.
+- Thin market: homes_sold < 10, MoM median variance > 20%, or fewer than 10 valid psf values.
+- 12 new fields output by scoring prompt: composite_score, 5 category scores, 5 detail lines,
+  thin_market boolean. All written to Webflow CMS and Supabase.
+- has-score written LAST to Webflow — score table stays hidden if any upstream step fails.
+- price_per_sqft calculated in pipeline (listing_price / sqft).
+- Content prompt updated: narrative explains score rationale, not just property description.
+- pipeline_runs tracking: redfin_null_skips, redfin_thin_market_count, redfin_api_credits_used.
+
 Changes (2026-08-29):
 - Image alt text overhauled to target GSC impression queries.
   New make_image_alt() generates varied keyword patterns matching real search queries:
@@ -76,9 +91,10 @@ SUPABASE_KEY           = os.environ["SUPABASE_KEY"]
 DAILY_PUBLISH_LIMIT    = int(os.environ.get("DAILY_PUBLISH_LIMIT", "10"))
 
 CLAUDE_MODEL                = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS_SCORING   = 250
+CLAUDE_MAX_TOKENS_SCORING   = 500
 CLAUDE_MAX_TOKENS_CONTENT   = 900
 REALTYAPI_REALTOR_BASE = "https://realtor.realtyapi.io"
+REALTYAPI_REDFIN_BASE  = "https://redfin.realtyapi.io"
 ANTHROPIC_BASE         = "https://api.anthropic.com/v1/messages"
 CF_IMAGES_BASE         = f"https://api.cloudflare.com/client/v4/accounts/{CLOUDFLARE_ACCOUNT_ID}/images/v1"
 CF_DELIVERY_BASE       = "https://imagedelivery.net/VbqNe4WDJ-oPFPFAkDRv_w"
@@ -171,7 +187,38 @@ STATE_TO_SLUG = {
 # Prompts
 # ---------------------------------------------------------------------------
 
-SCORING_PROMPT = """Score this residential listing for HousesUnder150K.com on editorial merit (1-10). Be strict — most listings score 4 or below. Only genuinely interesting listings score 6+. Low price alone is never enough.
+SCORING_PROMPT = """Score this residential listing for HousesUnder150K.com. You will receive property data and Redfin zip market data. Produce a five-category weighted composite score (1-10 scale, one decimal). Be strict — most listings score 4 or below. Only genuinely interesting listings score 6+. Low price alone is never enough.
+
+SCORING WEIGHTS: Property Merit (50%) + Condition (25%) + Price per Sq Ft (15%) + Price vs Market (5%) + Market Conditions (5%) = composite.
+
+PRICE PER SQ FT SCORING (compare LISTING_PSF to ZIP_MEDIAN_PSF):
+- More than 40% below zip median: 9-10
+- 20-40% below zip median: 7-8
+- 0-20% below zip median: 5-6
+- 0-20% above zip median: 3-4
+- More than 20% above zip median: 1-2
+- If zip median $/sqft unavailable: score 5 (neutral), detail = "insufficient zip $/sqft data"
+
+PRICE VS MARKET SCORING (listing price vs ZIP_MEDIAN_SALE_PRICE):
+- More than 50% below median: 9-10
+- 30-50% below median: 7-8
+- 10-30% below median: 5-6
+- Within 10% of median: 3-4
+- Above median: 1-2
+- Caution: if zip median appears driven by acreage/land sales rather than comparable homes, note this.
+
+MARKET CONDITIONS SCORING (ZIP_MEDIAN_DOM, ZIP_SALE_TO_LIST, ZIP_PRICE_DROPS_PCT — weight equally):
+- Long DOM + sale-to-list <97% + price drops >25% = strong buyer's market = 8-10
+- Mixed signals = 5-7
+- Short DOM + sale-to-list >100% + price drops <10% = competitive seller's market = 1-4
+
+CONDITION SCORING:
+- Move-in ready / renovated with specific system dates (roof, HVAC, windows): 8-10
+- Cosmetic work only, structure and systems sound: 5-7
+- Major renovation required: 2-4
+- Unknown / as-is without floor qualifier: 3-5 (lean lower with investor language)
+- AS-IS EXCEPTION: historic / acreage / waterfront / architectural value = 4-5 even as-is
+- Specificity bonus: named years for updates ("roof 2022") = +0.5 above range midpoint
 
 AUDIENCE: First-time buyers, remote workers, retirees — people with conventional financing and modest savings. They are dreamers who want to believe affordable homeownership is still possible. The listing must be something a regular person with a standard mortgage can actually buy and live in. If it requires cash, contractor skills, or investor experience to be viable, maximum score is 4 regardless of other signals.
 
@@ -229,18 +276,39 @@ SCORING BANDS:
 9-10: Hero / Deal of Day — exceptional on multiple dimensions, stops the scroll
 
 OUTPUT (exactly this format, no other text):
-SCORE: [1-10]
+SCORE: [composite 1-10, one decimal e.g. 7.4]
 TIER: [SKIP / BELOW_THRESHOLD / PUBLISH / FEATURED / HERO]
 CATEGORY: [NEW_CONSTRUCTION / WATERFRONT / ACREAGE / HISTORIC / RENOVATED / CHARACTER / HIDDEN_GEM / TOO_GOOD_TO_BE_TRUE / WHAT_IF]
 KEY_HOOKS: [2-4 specific compelling facts, comma separated]
 REASON: [1-2 sentences]
 DEAL_OF_DAY_CANDIDATE: [YES / NO]
+SCORE_PROPERTY_MERIT: [1-10, one decimal]
+SCORE_CONDITION: [1-10, one decimal]
+SCORE_PRICE_PER_SQFT: [1-10, one decimal]
+SCORE_PRICE_VS_MARKET: [1-10, one decimal]
+SCORE_MARKET_CONDITIONS: [1-10, one decimal]
+DETAIL_PROPERTY_MERIT: [one line, ≤15 words, factual — key physical signals that drove score]
+DETAIL_CONDITION: [one line, ≤15 words, factual — condition state and evidence]
+DETAIL_PRICE_PER_SQFT: [one line, ≤15 words — listing $/sqft and zip median if available]
+DETAIL_PRICE_VS_MARKET: [one line, ≤15 words — % vs zip median, note thin market if applies]
+DETAIL_MARKET_CONDITIONS: [one line, ≤15 words — DOM, sale-to-list, price drops]
+THIN_MARKET: [true / false]
 
 TIER MAP: 1-3=SKIP | 4-5=BELOW_THRESHOLD | 6=PUBLISH | 7-8=FEATURED | 9-10=HERO
 CATEGORIES: NEW_CONSTRUCTION=built within 2yr | WATERFRONT=any water | ACREAGE=land is story | HISTORIC=pre-1950 character | RENOVATED=updated systems | CHARACTER=unique details | HIDDEN_GEM=underrated value | TOO_GOOD_TO_BE_TRUE=price seems wrong | WHAT_IF=lifestyle/land fantasy"""
 
 
-CONTENT_PROMPT_TEMPLATE = """You looked at a house. Tell someone what you saw.
+CONTENT_PROMPT_TEMPLATE = """You looked at a house and scored it. Tell someone what you found — the score is the frame, the narrative is the explanation.
+
+The listing data includes the composite score and each category score. Your narrative should explain WHY it scored the way it did: what drove Property Merit up or down, what condition signals you saw, whether the price is genuinely good relative to the market, and what the market conditions mean for a buyer today. The reader sees the score table before reading your words — they want the story behind the numbers, not a repeat of the facts.
+
+Structure guidance (let the property dictate — do not follow this rigidly):
+- Open with the most interesting Property Merit signal — the thing that stops the scroll
+- Work through condition honestly — what's good, what needs work, what's unknown
+- Address price per square foot and market value in plain language
+- Close with market conditions context — what it means for a buyer looking today
+
+Do NOT open with score commentary like "This listing scored a 7.2" — weave the score rationale into editorial voice instead.
 
 You are not a copywriter. You are not a real estate agent. You are someone with taste and a point of view who actually looked at this property and is describing it honestly to a friend who asked. You notice things. You have opinions. You say what something is like, not what someone should feel about it.
 
@@ -696,7 +764,7 @@ def db_upsert_seen(address_key: str, slug: str, score: int, tier: str) -> None:
 
 def db_insert_published(
     slug: str, mls_number: str, webflow_item_id: str,
-    score: int, tier: str, category: str, headline: str,
+    score: float, tier: str, category: str, headline: str,
     hero_image_url: str, today_ct: date, price: int = 0,
     is_deal_of_day: bool = False,
     gallery_image_ids: list[str] | None = None,
@@ -705,6 +773,27 @@ def db_insert_published(
     social_caption: str | None = None,
     city: str | None = None,
     state: str | None = None,
+    # Scoring v2.0 fields
+    composite_score: float | None = None,
+    score_property_merit: float | None = None,
+    score_condition: float | None = None,
+    score_price_per_sqft: float | None = None,
+    score_price_vs_market: float | None = None,
+    score_market_conditions: float | None = None,
+    detail_property_merit: str | None = None,
+    detail_condition: str | None = None,
+    detail_price_per_sqft: str | None = None,
+    detail_price_vs_market: str | None = None,
+    detail_market_conditions: str | None = None,
+    price_per_sqft: float | None = None,
+    thin_market_flag: bool | None = None,
+    redfin_data_state: str | None = None,
+    redfin_median_price: float | None = None,
+    redfin_homes_sold: int | None = None,
+    redfin_median_dom: float | None = None,
+    redfin_sale_to_list: float | None = None,
+    redfin_price_drops_pct: float | None = None,
+    has_score: bool = False,
 ) -> None:
     url = f"{SUPABASE_URL}/rest/v1/published_listings"
     payload = {
@@ -721,6 +810,27 @@ def db_insert_published(
         "social_caption": social_caption,
         "city": city,
         "state": state,
+        # Scoring v2.0
+        "composite_score": composite_score,
+        "score_property_merit": score_property_merit,
+        "score_condition": score_condition,
+        "score_price_per_sqft": score_price_per_sqft,
+        "score_price_vs_market": score_price_vs_market,
+        "score_market_conditions": score_market_conditions,
+        "detail_property_merit": detail_property_merit,
+        "detail_condition": detail_condition,
+        "detail_price_per_sqft": detail_price_per_sqft,
+        "detail_price_vs_market": detail_price_vs_market,
+        "detail_market_conditions": detail_market_conditions,
+        "price_per_sqft": price_per_sqft,
+        "thin_market_flag": thin_market_flag,
+        "redfin_data_state": redfin_data_state,
+        "redfin_median_price": redfin_median_price,
+        "redfin_homes_sold": redfin_homes_sold,
+        "redfin_median_dom": redfin_median_dom,
+        "redfin_sale_to_list": redfin_sale_to_list,
+        "redfin_price_drops_pct": redfin_price_drops_pct,
+        "has_score": has_score,
     }
     try:
         r = requests.post(url, headers=_sb_headers(), json=payload, timeout=10)
@@ -808,11 +918,162 @@ def log_tokens(call_name: str, input_tokens: int, output_tokens: int) -> float:
 
 
 # ---------------------------------------------------------------------------
-# RealtyAPI — fetch listings + details
+# RealtyAPI — Redfin market data
 # ---------------------------------------------------------------------------
 
 def _ra_headers() -> dict:
     return {"x-realtyapi-key": REALTYAPI_KEY}
+
+
+def fetch_redfin_market_data(zip_code: str) -> dict | None:
+    """Fetch /housingMarketTrends for a zip. Returns structured dict or None on true null."""
+    try:
+        r = requests.get(
+            f"{REALTYAPI_REDFIN_BASE}/housingMarketTrends",
+            headers=_ra_headers(),
+            params={"location": zip_code},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        log.error(f"Redfin /housingMarketTrends failed [{zip_code}]: {e}")
+        return None
+
+    sections = data.get("sections", [])
+    if not sections:
+        log.info(f"Redfin null zip: {zip_code} — no sections returned")
+        return None
+
+    result = {
+        "median_sale_price": 0,
+        "homes_sold": 0,
+        "median_dom": 0.0,
+        "sale_to_list": 0.0,
+        "price_drops_pct": 0.0,
+        "aggregate_price_data": [],  # list of {"date": ..., "value": ...} newest first
+    }
+    found_any = False
+
+    for section in sections:
+        if section.get("error"):
+            continue
+        for metric in section.get("metrics", []):
+            label = metric.get("label", "")
+            raw_val = metric.get("value", "")
+            agg = metric.get("aggregateData", [])
+
+            if label == "Median Sale Price":
+                try:
+                    result["median_sale_price"] = int(float(str(raw_val).replace("$", "").replace(",", "")))
+                    result["aggregate_price_data"] = agg
+                    found_any = True
+                except (ValueError, TypeError):
+                    pass
+            elif label == "# of Homes Sold":
+                try:
+                    result["homes_sold"] = int(float(str(raw_val)))
+                    found_any = True
+                except (ValueError, TypeError):
+                    pass
+            elif label == "Median Days on Market":
+                try:
+                    result["median_dom"] = float(str(raw_val))
+                    found_any = True
+                except (ValueError, TypeError):
+                    pass
+            elif label == "Sale-to-List Price":
+                # value is a display string like "94.7%" — parse as ratio
+                try:
+                    raw_str = str(raw_val).replace("%", "").strip()
+                    result["sale_to_list"] = float(raw_str) / 100.0
+                    found_any = True
+                except (ValueError, TypeError):
+                    pass
+            elif label == "Homes with Price Drops":
+                # value is a display string like "40.8%"
+                try:
+                    raw_str = str(raw_val).replace("%", "").strip()
+                    result["price_drops_pct"] = float(raw_str) / 100.0
+                    found_any = True
+                except (ValueError, TypeError):
+                    pass
+
+    if not found_any:
+        log.info(f"Redfin null zip: {zip_code} — no usable metric data")
+        return None
+
+    log.info(
+        f"Redfin [{zip_code}]: median=${result['median_sale_price']:,} "
+        f"sold={result['homes_sold']} dom={result['median_dom']:.0f} "
+        f"s2l={result['sale_to_list']*100:.1f}% drops={result['price_drops_pct']*100:.1f}%"
+    )
+    return result
+
+
+def fetch_redfin_psf_data(zip_code: str) -> float | None:
+    """Fetch /recentlySold for a zip and return median pricePerSqFt, or None if <10 values."""
+    try:
+        r = requests.get(
+            f"{REALTYAPI_REDFIN_BASE}/recentlySold",
+            headers=_ra_headers(),
+            params={"location": zip_code, "count": 50},
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+    except requests.RequestException as e:
+        log.error(f"Redfin /recentlySold failed [{zip_code}]: {e}")
+        return None
+
+    homes = (data.get("homes") or {}).get("homes", [])
+    psf_values = []
+    for home in homes:
+        psf = (home.get("pricePerSqFt") or {}).get("value")
+        if psf and isinstance(psf, (int, float)) and psf > 0:
+            psf_values.append(float(psf))
+
+    if len(psf_values) < 10:
+        log.info(f"Redfin [{zip_code}]: only {len(psf_values)} valid PSF values — thin market (psf)")
+        return None
+
+    psf_values.sort()
+    mid = len(psf_values) // 2
+    if len(psf_values) % 2 == 0:
+        median_psf = (psf_values[mid - 1] + psf_values[mid]) / 2.0
+    else:
+        median_psf = psf_values[mid]
+
+    log.info(f"Redfin [{zip_code}]: zip median PSF=${median_psf:.0f} ({len(psf_values)} comps)")
+    return round(median_psf, 1)
+
+
+def is_thin_market(homes_sold: int, aggregate_price_data: list, psf_count: int) -> bool:
+    """Return True if any thin-market condition applies."""
+    if homes_sold < 10:
+        return True
+    if psf_count < 10:
+        return True
+    # Check MoM variance in trailing 6 months of median prices
+    recent_vals = []
+    for entry in aggregate_price_data[:6]:
+        try:
+            recent_vals.append(float(entry["value"]))
+        except (KeyError, ValueError, TypeError):
+            continue
+    if len(recent_vals) < 2:
+        return True  # insufficient history
+    for i in range(len(recent_vals) - 1):
+        current = recent_vals[i]
+        prior = recent_vals[i + 1]
+        if prior > 0 and abs(current - prior) / prior > 0.20:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# RealtyAPI — fetch listings + details
+# ---------------------------------------------------------------------------
 
 
 def fetch_search_results(state_name: str, result_count: int = 50, sort_order: str = "Newest") -> list[dict]:
@@ -1078,7 +1339,12 @@ def call_claude(system: str, user: str, call_name: str, max_tokens: int = CLAUDE
 # Call 1 — Scoring
 # ---------------------------------------------------------------------------
 
-def build_scoring_input(listing: dict) -> str:
+def build_scoring_input(
+    listing: dict,
+    redfin_market: dict | None,
+    zip_median_psf: float | None,
+    price_per_sqft: float | None,
+) -> str:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
@@ -1086,6 +1352,7 @@ def build_scoring_input(listing: dict) -> str:
     address    = addr.get("formattedStreetLine", "")
     city       = addr.get("city", "")
     state      = addr.get("state", "")
+    zip_code   = addr.get("zip", "unknown")
     beds       = parse_int(details.get("numBedrooms"))
     baths      = parse_int(details.get("numBathrooms"))
     sqft       = parse_int(details.get("sqft"))
@@ -1098,6 +1365,28 @@ def build_scoring_input(listing: dict) -> str:
     pool       = "Y" if details.get("pool") else "N"
     description = details.get("description", "") or "(no description)"
 
+    psf_str     = f"${price_per_sqft:.0f}/sqft" if price_per_sqft else "null (sqft unavailable)"
+    zip_psf_str = f"${zip_median_psf:.0f}/sqft" if zip_median_psf else "unavailable"
+
+    if redfin_market:
+        median_price = redfin_market.get("median_sale_price", 0)
+        homes_sold   = redfin_market.get("homes_sold", 0)
+        median_dom   = redfin_market.get("median_dom", 0.0)
+        sale_to_list = redfin_market.get("sale_to_list", 0.0)
+        price_drops  = redfin_market.get("price_drops_pct", 0.0)
+        thin         = redfin_market.get("thin_market", False)
+        market_block = (
+            f"ZIP_MEDIAN_SALE_PRICE: ${median_price:,}\n"
+            f"ZIP_HOMES_SOLD_LAST_MONTH: {homes_sold}\n"
+            f"ZIP_MEDIAN_DOM: {median_dom:.0f} days\n"
+            f"ZIP_SALE_TO_LIST: {sale_to_list * 100:.1f}%\n"
+            f"ZIP_PRICE_DROPS_PCT: {price_drops * 100:.1f}%\n"
+            f"ZIP_MEDIAN_PSF: {zip_psf_str}\n"
+            f"MARKET_DATA_STATE: {'thin' if thin else 'reliable'}"
+        )
+    else:
+        market_block = "MARKET_DATA_STATE: null (no Redfin data available for this zip)"
+
     return f"""PRICE: {price}
 ADDRESS: {address}
 CITY: {city}
@@ -1109,6 +1398,11 @@ YEAR_BUILT: {year}
 ACREAGE: {acreage}
 POOL: {pool}
 WATERFRONT: {waterfront}
+LISTING_PSF: {psf_str}
+
+REDFIN MARKET DATA (zip {zip_code}):
+{market_block}
+
 DESCRIPTION: {description}"""
 
 
@@ -1118,6 +1412,19 @@ def parse_scoring_output(text: str) -> dict:
         if ":" in line:
             key, _, val = line.partition(":")
             result[key.strip()] = val.strip()
+
+    # Parse THIN_MARKET boolean
+    thin_raw = result.get("THIN_MARKET", "false").lower()
+    result["THIN_MARKET"] = thin_raw in ("true", "yes", "1")
+
+    # Parse float category score fields (default 5.0 if missing/malformed)
+    for field in ("SCORE_PROPERTY_MERIT", "SCORE_CONDITION", "SCORE_PRICE_PER_SQFT",
+                  "SCORE_PRICE_VS_MARKET", "SCORE_MARKET_CONDITIONS"):
+        try:
+            result[field] = round(float(result.get(field, "5")), 1)
+        except (ValueError, TypeError):
+            result[field] = 5.0
+
     return result
 
 
@@ -1163,12 +1470,22 @@ def prefilter_listing(listing: dict) -> bool:
     return True
 
 
-def score_listing(listing: dict) -> tuple[dict | None, float]:
-    raw, cost = call_claude(SCORING_PROMPT, build_scoring_input(listing), "scoring")
+def score_listing(
+    listing: dict,
+    redfin_market: dict | None,
+    zip_median_psf: float | None,
+    price_per_sqft: float | None,
+) -> tuple[dict | None, float]:
+    scoring_input = build_scoring_input(listing, redfin_market, zip_median_psf, price_per_sqft)
+    raw, cost = call_claude(SCORING_PROMPT, scoring_input, "scoring")
     if not raw:
         return None, cost
     parsed = parse_scoring_output(raw)
-    score_val = parse_int(parsed.get("SCORE", "0"))
+    # SCORE is the composite — parse as float (one decimal)
+    try:
+        score_val = round(float(parsed.get("SCORE", "0")), 1)
+    except (ValueError, TypeError):
+        score_val = 0.0
     parsed["SCORE"] = score_val
     log.info(
         f"Score: {score_val} | Tier: {parsed.get('TIER')} | "
@@ -1188,6 +1505,7 @@ def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, floa
     addr    = listing.get("address", {})
     details = listing.get("details", {})
 
+    composite = score_data.get("SCORE", 0)
     listing_data = (
         f"ADDRESS: {addr.get('formattedStreetLine', '')}\n"
         f"CITY: {addr.get('city', '')}\n"
@@ -1197,6 +1515,17 @@ def generate_content(listing: dict, score_data: dict) -> tuple[dict | None, floa
         f"BATHS: {parse_int(details.get('numBathrooms'))} | "
         f"SQFT: {parse_int(details.get('sqft'))} | "
         f"YEAR BUILT: {parse_int(details.get('yearBuilt'))}\n"
+        f"COMPOSITE SCORE: {composite}/10\n"
+        f"SCORE_PROPERTY_MERIT: {score_data.get('SCORE_PROPERTY_MERIT', '')} | "
+        f"SCORE_CONDITION: {score_data.get('SCORE_CONDITION', '')} | "
+        f"SCORE_PRICE_PER_SQFT: {score_data.get('SCORE_PRICE_PER_SQFT', '')} | "
+        f"SCORE_PRICE_VS_MARKET: {score_data.get('SCORE_PRICE_VS_MARKET', '')} | "
+        f"SCORE_MARKET_CONDITIONS: {score_data.get('SCORE_MARKET_CONDITIONS', '')}\n"
+        f"DETAIL_PROPERTY_MERIT: {score_data.get('DETAIL_PROPERTY_MERIT', '')}\n"
+        f"DETAIL_CONDITION: {score_data.get('DETAIL_CONDITION', '')}\n"
+        f"DETAIL_PRICE_PER_SQFT: {score_data.get('DETAIL_PRICE_PER_SQFT', '')}\n"
+        f"DETAIL_PRICE_VS_MARKET: {score_data.get('DETAIL_PRICE_VS_MARKET', '')}\n"
+        f"DETAIL_MARKET_CONDITIONS: {score_data.get('DETAIL_MARKET_CONDITIONS', '')}\n"
         f"EDITORIAL CATEGORY: {score_data.get('CATEGORY', '')}\n"
         f"KEY HOOKS: {score_data.get('KEY_HOOKS', '')}\n\n"
         f"AGENT DESCRIPTION — this is real estate marketing copy written to sell the property. "
@@ -1325,6 +1654,7 @@ def write_webflow(
     listing: dict, score_data: dict, content: dict,
     hero_image_url: str, is_hero: bool,
     gallery_field_data: list[dict] | None = None,
+    price_per_sqft: float | None = None,
 ) -> str | None:
     addr    = listing.get("address", {})
     details = listing.get("details", {})
@@ -1371,12 +1701,33 @@ def write_webflow(
         "tags":             generate_tags(score_data, listing),
         "status":           WF_STATUS_ACTIVE,
         "deal-of-the-day":  is_hero,
+        # Score table fields
+        "composite-score":        score_data.get("SCORE"),
+        "score-property-merit":   score_data.get("SCORE_PROPERTY_MERIT"),
+        "score-condition":         score_data.get("SCORE_CONDITION"),
+        "score-price-per-sqft":   score_data.get("SCORE_PRICE_PER_SQFT"),
+        "score-price-vs-market":  score_data.get("SCORE_PRICE_VS_MARKET"),
+        "score-market-conditions": score_data.get("SCORE_MARKET_CONDITIONS"),
+        "detail-property-merit":  score_data.get("DETAIL_PROPERTY_MERIT") or "",
+        "detail-condition":        score_data.get("DETAIL_CONDITION") or "",
+        "detail-price-per-sqft":  score_data.get("DETAIL_PRICE_PER_SQFT") or "",
+        "detail-price-vs-market": score_data.get("DETAIL_PRICE_VS_MARKET") or "",
+        "detail-market-conditions": score_data.get("DETAIL_MARKET_CONDITIONS") or "",
+        "thin-market-flag":       bool(score_data.get("THIN_MARKET", False)),
+        "price-per-sqft":         price_per_sqft,
+        # has-score intentionally omitted here — written LAST in a separate PATCH below
     }
 
     if gallery_field_data:
         field_data["gallery-images"] = gallery_field_data
 
-    headers = {
+    # Remove None values from score number fields to avoid Webflow type errors
+    field_data = {k: v for k, v in field_data.items() if v is not None or k in (
+        "thin-market-flag", "deal-of-the-day", "narrative-body", "short-summary",
+        "social-caption", "tags",
+    )}
+
+    wf_headers = {
         "Authorization": f"Bearer {WEBFLOW_API_TOKEN}",
         "Content-Type": "application/json",
         "accept": "application/json",
@@ -1386,7 +1737,7 @@ def write_webflow(
     try:
         r = requests.post(
             f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items",
-            headers=headers,
+            headers=wf_headers,
             json={"fieldData": field_data},
             timeout=30,
         )
@@ -1399,6 +1750,22 @@ def write_webflow(
 
     item_id = r.json().get("id")
     log.info(f"Webflow item created: {item_id}")
+
+    # Write has-score LAST — only after all other fields confirmed written.
+    # If this PATCH fails, has-score stays false and the score table stays hidden.
+    try:
+        patch_r = requests.patch(
+            f"{WEBFLOW_BASE}/collections/{WEBFLOW_COLLECTION_ID}/items/{item_id}",
+            headers=wf_headers,
+            json={"fieldData": {"has-score": True}},
+            timeout=30,
+        )
+        patch_r.raise_for_status()
+        log.info(f"Webflow has-score set: {item_id}")
+    except requests.RequestException as e:
+        log.error(f"Webflow has-score PATCH failed ({item_id}): {e} — score table will stay hidden")
+        # Do not return None — the item was created successfully; only has-score failed
+
     return item_id
 
 
@@ -1480,17 +1847,25 @@ def publish_site() -> bool:
 # Per-listing pipeline
 # ---------------------------------------------------------------------------
 
-def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple[str, float, bool]:
+def process_listing(
+    listing: dict,
+    today_ct: date,
+    dod_available: bool,
+    redfin_market_cache: dict,
+    redfin_psf_cache: dict,
+    run_stats: dict,
+) -> tuple[str, float, bool]:
     addr       = listing.get("address", {})
     price      = parse_int(listing.get("listPrice", 0))
     city       = addr.get("city", "unknown")
     state_full = addr.get("stateFull", addr.get("state", ""))
+    zip_code   = addr.get("zip", "")
     address_key = listing.get("mlsNumber", "unknown")
     slug       = make_slug(addr.get("formattedStreetLine", ""), city, addr.get("state", ""))
     list_date  = listing.get("listDate")
     total_cost = 0.0
 
-    log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) ---")
+    log.info(f"--- Processing: {city} ${make_price_display(price)} ({address_key}) zip={zip_code} ---")
 
     if db_slug_published(slug):
         log.info(f"Skipping {slug} — already published")
@@ -1506,7 +1881,45 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         db_upsert_seen(address_key, slug, 2, "SKIP")
         return "skipped_score", 0.0, False
 
-    score_data, score_cost = score_listing(listing)
+    # --- Redfin market data fetch (cached per zip per run) ---
+    if zip_code and zip_code not in redfin_market_cache:
+        redfin_market_cache[zip_code] = fetch_redfin_market_data(zip_code)
+        redfin_psf_cache[zip_code] = fetch_redfin_psf_data(zip_code)
+        run_stats["redfin_api_credits_used"] += 2
+        time.sleep(0.2)
+
+    redfin_market = redfin_market_cache.get(zip_code) if zip_code else None
+    zip_median_psf = redfin_psf_cache.get(zip_code) if zip_code else None
+
+    # True null — no Redfin data at all: skip this listing
+    if zip_code and redfin_market is None:
+        skip_reason = f"redfin_null_zip_{zip_code}"
+        log.info(f"Skipping {slug} — {skip_reason}")
+        run_stats["redfin_null_skips"] += 1
+        db_upsert_seen(address_key, slug, 0, "SKIP")
+        return "skipped_redfin_null", 0.0, False
+
+    # Assess thin market and stamp onto redfin_market dict for downstream use
+    psf_count = 0 if zip_median_psf is None else 10  # None means <10 valid values
+    if redfin_market:
+        thin = is_thin_market(
+            redfin_market["homes_sold"],
+            redfin_market["aggregate_price_data"],
+            psf_count,
+        )
+        redfin_market["thin_market"] = thin
+        if thin:
+            run_stats["redfin_thin_market_count"] += 1
+            log.info(f"Thin market: zip {zip_code}")
+        redfin_data_state = "thin" if thin else "reliable"
+    else:
+        redfin_data_state = "null"
+
+    # Calculate price_per_sqft
+    sqft = parse_int(listing.get("details", {}).get("sqft"))
+    price_per_sqft = round(price / sqft, 1) if sqft > 0 else None
+
+    score_data, score_cost = score_listing(listing, redfin_market, zip_median_psf, price_per_sqft)
     total_cost += score_cost
     if not score_data:
         return "error", total_cost, False
@@ -1549,7 +1962,10 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         if prior and prior.get("webflow_item_id"):
             unset_deal_of_the_day(prior)
 
-    item_id = write_webflow(listing, score_data, content, hero_image_url, is_hero, gallery_field_data)
+    item_id = write_webflow(
+        listing, score_data, content, hero_image_url, is_hero,
+        gallery_field_data, price_per_sqft,
+    )
     if not item_id:
         return "error", total_cost, False
 
@@ -1568,9 +1984,34 @@ def process_listing(listing: dict, today_ct: date, dod_available: bool) -> tuple
         social_caption=content.get("SOCIAL_CAPTION", "") or None,
         city=addr.get("city") or None,
         state=addr.get("state") or None,
+        # Scoring v2.0
+        composite_score=score,
+        score_property_merit=score_data.get("SCORE_PROPERTY_MERIT"),
+        score_condition=score_data.get("SCORE_CONDITION"),
+        score_price_per_sqft=score_data.get("SCORE_PRICE_PER_SQFT"),
+        score_price_vs_market=score_data.get("SCORE_PRICE_VS_MARKET"),
+        score_market_conditions=score_data.get("SCORE_MARKET_CONDITIONS"),
+        detail_property_merit=score_data.get("DETAIL_PROPERTY_MERIT") or None,
+        detail_condition=score_data.get("DETAIL_CONDITION") or None,
+        detail_price_per_sqft=score_data.get("DETAIL_PRICE_PER_SQFT") or None,
+        detail_price_vs_market=score_data.get("DETAIL_PRICE_VS_MARKET") or None,
+        detail_market_conditions=score_data.get("DETAIL_MARKET_CONDITIONS") or None,
+        price_per_sqft=price_per_sqft,
+        thin_market_flag=bool(score_data.get("THIN_MARKET", False)),
+        redfin_data_state=redfin_data_state,
+        redfin_median_price=redfin_market.get("median_sale_price") if redfin_market else None,
+        redfin_homes_sold=redfin_market.get("homes_sold") if redfin_market else None,
+        redfin_median_dom=redfin_market.get("median_dom") if redfin_market else None,
+        redfin_sale_to_list=redfin_market.get("sale_to_list") if redfin_market else None,
+        redfin_price_drops_pct=redfin_market.get("price_drops_pct") if redfin_market else None,
+        has_score=True,
     )
 
-    log.info(f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, gallery_photos={len(gallery_image_ids)}, list_date={list_date})")
+    log.info(
+        f"Published: {slug} (score={score}, tier={tier}, deal_of_day={is_hero}, "
+        f"gallery_photos={len(gallery_image_ids)}, list_date={list_date}, "
+        f"redfin_state={redfin_data_state}, psf={price_per_sqft})"
+    )
     return "published", total_cost, is_hero
 
 
@@ -1605,11 +2046,17 @@ def run_pipeline():
             db_update_run(run_id, {"completed_at": datetime.now(timezone.utc).isoformat(), "listings_fetched": 0})
         return
 
-    stats = {"published": 0, "skipped_score": 0, "skipped_dedup": 0, "skipped_seen": 0, "error": 0}
+    stats = {"published": 0, "skipped_score": 0, "skipped_dedup": 0, "skipped_seen": 0,
+             "skipped_redfin_null": 0, "error": 0}
     total_cost = 0.0
     published_this_run = 0
     dod_available = not db_deal_of_day_chosen_today(today_ct)
     log.info(f"Deal-of-the-day available today: {dod_available}")
+
+    # Redfin zip caches and run-level counters (shared across all listings in this run)
+    redfin_market_cache: dict = {}
+    redfin_psf_cache: dict = {}
+    run_stats = {"redfin_null_skips": 0, "redfin_thin_market_count": 0, "redfin_api_credits_used": 0}
 
     for listing in listings:
         if count_today + published_this_run >= DAILY_PUBLISH_LIMIT:
@@ -1617,7 +2064,10 @@ def run_pipeline():
             break
 
         try:
-            result, cost, dod_used = process_listing(listing, today_ct, dod_available)
+            result, cost, dod_used = process_listing(
+                listing, today_ct, dod_available,
+                redfin_market_cache, redfin_psf_cache, run_stats,
+            )
             stats[result] = stats.get(result, 0) + 1
             total_cost += cost
             if result == "published":
@@ -1635,7 +2085,9 @@ def run_pipeline():
         f"=== Pipeline complete in {elapsed:.1f}s | "
         f"published={stats['published']} skipped_score={stats['skipped_score']} "
         f"skipped_seen={stats['skipped_seen']} skipped_dedup={stats['skipped_dedup']} "
-        f"errors={stats['error']} est_cost=${total_cost:.5f} ==="
+        f"skipped_redfin_null={stats['skipped_redfin_null']} "
+        f"errors={stats['error']} est_cost=${total_cost:.5f} "
+        f"redfin_credits={run_stats['redfin_api_credits_used']} ==="
     )
 
     if run_id:
@@ -1648,6 +2100,9 @@ def run_pipeline():
             "errors": stats["error"],
             "est_cost_usd": round(total_cost, 5),
             "daily_limit_hit": (count_today + published_this_run) >= DAILY_PUBLISH_LIMIT,
+            "redfin_null_skips": run_stats["redfin_null_skips"],
+            "redfin_thin_market_count": run_stats["redfin_thin_market_count"],
+            "redfin_api_credits_used": run_stats["redfin_api_credits_used"],
         })
 
     if published_this_run > 0:
